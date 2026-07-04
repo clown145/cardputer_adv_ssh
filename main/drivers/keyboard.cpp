@@ -35,6 +35,33 @@ constexpr KeyMapEntry C(char normal, char shifted, char fn_char)
     return {normal, shifted, KeyKind::kCharacter, KeyKind::kCharacter, fn_char};
 }
 
+char control_char_for(char ch)
+{
+    if (ch >= 'a' && ch <= 'z') {
+        return ch - 'a' + 1;
+    }
+    if (ch >= 'A' && ch <= 'Z') {
+        return ch - 'A' + 1;
+    }
+    switch (ch) {
+        case '@':
+        case ' ':
+            return '\0';
+        case '[':
+            return '\x1B';
+        case '\\':
+            return '\x1C';
+        case ']':
+            return '\x1D';
+        case '^':
+            return '\x1E';
+        case '_':
+            return '\x1F';
+        default:
+            return '\0';
+    }
+}
+
 constexpr KeyMapEntry kKeyMap[4][14] = {
     {S(KeyKind::kEscape), K('1', '!'), K('2', '@'), K('3', '#'), K('4', '$'), K('5', '%'), K('6', '^'),
      K('7', '&'), K('8', '*'), K('9', '('), K('0', ')'), K('-', '_'), K('=', '+'), S(KeyKind::kBackspace)},
@@ -113,10 +140,20 @@ KeyEvent Keyboard::convert(const RawKey& key)
 
     if (key.row == 2 && key.col == 0) {
         fn_ = key.pressed;
+        if (key.pressed) {
+            fn_latched_ = true;
+        }
         return {};
     }
     if (key.row == 2 && key.col == 1) {
         shift_ = key.pressed;
+        return {};
+    }
+    if (key.row == 3 && key.col <= 2) {
+        ctrl_ = key.pressed;
+        if (key.pressed) {
+            ctrl_latched_ = true;
+        }
         return {};
     }
 
@@ -125,12 +162,27 @@ KeyEvent Keyboard::convert(const RawKey& key)
     }
 
     const auto& entry = kKeyMap[key.row][key.col];
-    if (fn_ && entry.fn_kind != KeyKind::kNone) {
+    bool use_fn = fn_ || fn_latched_;
+    bool use_ctrl = ctrl_ || ctrl_latched_;
+    if (use_fn && entry.fn_kind != KeyKind::kNone) {
+        fn_latched_ = false;
         return {.kind = entry.fn_kind, .character = entry.fn_char, .pressed = true};
     }
     if (entry.normal_kind != KeyKind::kCharacter) {
+        fn_latched_ = false;
+        ctrl_latched_ = false;
         return {.kind = entry.normal_kind, .character = '\0', .pressed = true};
     }
+    if (use_fn || use_ctrl) {
+        char control = control_char_for(shift_ ? entry.shifted : entry.normal);
+        if (control != '\0') {
+            fn_latched_ = false;
+            ctrl_latched_ = false;
+            return {.kind = KeyKind::kCharacter, .character = control, .pressed = true};
+        }
+    }
+    fn_latched_ = false;
+    ctrl_latched_ = false;
     return {.kind = KeyKind::kCharacter, .character = shift_ ? entry.shifted : entry.normal, .pressed = true};
 }
 

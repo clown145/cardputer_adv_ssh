@@ -47,6 +47,9 @@ private:
     Tca8418 tca_;
     bool shift_ = false;
     bool fn_ = false;
+    bool ctrl_ = false;
+    bool fn_latched_ = false;
+    bool ctrl_latched_ = false;
 };
 
 }  // namespace adv

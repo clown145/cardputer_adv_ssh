@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -33,6 +34,8 @@ public:
     esp_err_t open_shell(uint16_t cols = 80, uint16_t rows = 24);
     esp_err_t write_shell(const std::string& data);
     esp_err_t read_shell(std::string& output, uint32_t quiet_ms);
+    esp_err_t read_shell_chunk(std::string& output, size_t max_bytes);
+    esp_err_t send_signal(const char* signal);
     esp_err_t send_shell_line(const std::string& line, std::string& output);
     void close_shell();
     void disconnect();

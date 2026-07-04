@@ -8,10 +8,14 @@ namespace adv {
 
 struct TerminalCell {
     char ch = ' ';
+    uint32_t codepoint = ' ';
     uint8_t fg = 7;
     uint8_t bg = 0;
+    uint8_t width = 1;
     bool bold = false;
     bool inverse = false;
+    bool underline = false;
+    bool continuation = false;
 };
 
 class TerminalEmulator {
@@ -23,6 +27,7 @@ public:
 
     void reset();
     void process(const std::string& bytes);
+    std::string take_pending_output();
     void mark_all_dirty();
     void clear_dirty();
 
@@ -31,6 +36,7 @@ public:
     int cursor_row() const;
     int cursor_col() const;
     bool cursor_visible() const;
+    bool application_cursor_mode() const;
 
 private:
     enum class ParserState {
@@ -39,6 +45,7 @@ private:
         kCsi,
         kOsc,
         kOscEsc,
+        kIgnoreOne,
     };
 
     struct CursorState {
@@ -51,6 +58,10 @@ private:
     TerminalCell& active_cell(int row, int col);
     void mark_dirty(int row);
     void put_char(char ch);
+    void put_codepoint(uint32_t codepoint);
+    void put_glyph(uint32_t codepoint, int width);
+    void handle_utf8_byte(uint8_t ch);
+    void clear_wide_fragment(int row, int col);
     void line_feed();
     void reverse_index();
     void carriage_return();
@@ -63,14 +74,21 @@ private:
     void clear_screen(int mode);
     void set_cursor(int row, int col);
     void move_cursor(int row_delta, int col_delta);
+    void set_scroll_region(int top, int bottom);
     void save_cursor();
     void restore_cursor();
     void reset_style();
     void apply_sgr();
+    void apply_mode(bool enabled);
+    void apply_extended_color(bool foreground, size_t& index);
     void enter_alt_screen(bool save);
     void leave_alt_screen(bool restore);
     void clear_active_screen();
+    void append_device_attributes();
+    void append_secondary_device_attributes();
+    void append_cursor_report(bool dec);
     void handle_escape(uint8_t ch);
+    void handle_charset_select(uint8_t ch);
     void begin_csi();
     void collect_csi(uint8_t ch);
     void dispatch_csi(uint8_t final);
@@ -88,7 +106,21 @@ private:
     int scroll_top_ = 0;
     int scroll_bottom_ = kRows - 1;
     bool cursor_visible_ = true;
+    bool auto_wrap_ = true;
+    bool wrap_pending_ = false;
+    bool origin_mode_ = false;
+    bool insert_mode_ = false;
+    bool selecting_charset_ = false;
+    bool dec_graphics_ = false;
+    bool saved_dec_graphics_ = false;
+    bool application_cursor_mode_ = false;
+    uint32_t last_printed_codepoint_ = ' ';
+    int last_printed_width_ = 1;
     TerminalCell style_;
+    std::string pending_output_;
+    uint32_t utf8_codepoint_ = 0;
+    uint8_t utf8_remaining_ = 0;
+    uint8_t utf8_expected_ = 0;
     std::vector<int> csi_params_;
     int csi_current_ = -1;
     char csi_private_ = '\0';

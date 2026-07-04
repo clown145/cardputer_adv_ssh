@@ -16,6 +16,7 @@ namespace adv {
 namespace {
 constexpr const char* TAG = "ssh";
 constexpr int kReadBufferSize = 512;
+constexpr size_t kMaxReadDrainBytes = 4096;
 constexpr int kShellDrainMs = 700;
 
 std::string libssh2_error(LIBSSH2_SESSION* session, const char* fallback)
@@ -171,6 +172,15 @@ esp_err_t SshClient::open_shell(uint16_t cols, uint16_t rows)
         return ESP_FAIL;
     }
 
+    auto request_env = [&](const char* name, const char* value) {
+        int env_rc = libssh2_channel_setenv(shell_channel_, name, value);
+        if (env_rc != 0) {
+            ESP_LOGW(TAG, "ssh server rejected env %s=%s", name, value);
+        }
+    };
+    request_env("LANG", "C.UTF-8");
+    request_env("LC_CTYPE", "C.UTF-8");
+
     int rc = libssh2_channel_request_pty_ex(shell_channel_, "xterm", 5, nullptr, 0, cols, rows, 0, 0);
     if (rc != 0) {
         set_error(libssh2_error(session_, "ssh pty request failed"));
@@ -235,6 +245,9 @@ esp_err_t SshClient::read_shell(std::string& output, uint32_t quiet_ms)
         if (rc > 0) {
             output.append(buffer, buffer + rc);
             waited_ms = 0;
+            if (quiet_ms == 0 && output.size() >= kMaxReadDrainBytes) {
+                break;
+            }
             continue;
         }
         if (rc == LIBSSH2_ERROR_EAGAIN || rc == 0) {
@@ -247,6 +260,52 @@ esp_err_t SshClient::read_shell(std::string& output, uint32_t quiet_ms)
         }
         set_error(libssh2_error(session_, "ssh shell read failed"));
         close_shell();
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t SshClient::read_shell_chunk(std::string& output, size_t max_bytes)
+{
+    output.clear();
+    if (shell_channel_ == nullptr) {
+        ESP_RETURN_ON_ERROR(open_shell(), TAG, "open shell");
+    }
+    if (max_bytes == 0) {
+        return ESP_OK;
+    }
+
+    char buffer[kReadBufferSize];
+    while (output.size() < max_bytes) {
+        size_t wanted = std::min(sizeof(buffer), max_bytes - output.size());
+        ssize_t rc = libssh2_channel_read(shell_channel_, buffer, wanted);
+        if (rc > 0) {
+            output.append(buffer, buffer + rc);
+            continue;
+        }
+        if (rc == LIBSSH2_ERROR_EAGAIN || rc == 0) {
+            break;
+        }
+        set_error(libssh2_error(session_, "ssh shell read failed"));
+        close_shell();
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t SshClient::send_signal(const char* signal)
+{
+    if (shell_channel_ == nullptr) {
+        ESP_RETURN_ON_ERROR(open_shell(), TAG, "open shell");
+    }
+    int rc = libssh2_channel_signal(shell_channel_, signal);
+    if (rc == LIBSSH2_ERROR_EAGAIN) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        rc = libssh2_channel_signal(shell_channel_, signal);
+    }
+    if (rc != 0) {
+        last_error_ = libssh2_error(session_, "ssh signal failed");
+        ESP_LOGW(TAG, "%s", last_error_.c_str());
         return ESP_FAIL;
     }
     return ESP_OK;

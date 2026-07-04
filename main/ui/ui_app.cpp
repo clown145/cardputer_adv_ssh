@@ -78,11 +78,12 @@ bool parse_server_string(const std::string& raw, SshProfile& profile)
     return true;
 }
 
-std::string key_to_shell_bytes(const KeyEvent& event)
+std::string key_to_shell_bytes(const KeyEvent& event, bool application_cursor)
 {
+    const char* prefix = application_cursor ? "\x1BO" : "\x1B[";
     switch (event.kind) {
         case KeyKind::kCharacter:
-            return event.character >= 32 && event.character <= 126 ? std::string(1, event.character) : std::string();
+            return (event.character >= 1 && event.character <= 126) ? std::string(1, event.character) : std::string();
         case KeyKind::kEnter:
             return "\r";
         case KeyKind::kEscape:
@@ -93,13 +94,13 @@ std::string key_to_shell_bytes(const KeyEvent& event)
         case KeyKind::kTab:
             return "\t";
         case KeyKind::kUp:
-            return "\x1B[A";
+            return std::string(prefix) + "A";
         case KeyKind::kDown:
-            return "\x1B[B";
+            return std::string(prefix) + "B";
         case KeyKind::kRight:
-            return "\x1B[C";
+            return std::string(prefix) + "C";
         case KeyKind::kLeft:
-            return "\x1B[D";
+            return std::string(prefix) + "D";
         default:
             return {};
     }
@@ -315,19 +316,9 @@ void UiApp::terminal_screen()
     int last_cursor_row = terminal.cursor_row();
     int last_cursor_col = terminal.cursor_col();
     TickType_t last_escape_tick = 0;
+    TickType_t last_draw_tick = 0;
 
-    while (true) {
-        std::string output;
-        if (ssh_.read_shell(output, 0) != ESP_OK) {
-            terminal.process("\r\nERR: " + ssh_.last_error() + "\r\n");
-            display_.draw_terminal_rows(terminal, terminal.dirty_rows());
-            vTaskDelay(pdMS_TO_TICKS(1200));
-            return;
-        }
-        if (!output.empty()) {
-            terminal.process(output);
-        }
-
+    auto draw_dirty = [&]() {
         auto dirty = terminal.dirty_rows();
         if (last_cursor_row != terminal.cursor_row() || last_cursor_col != terminal.cursor_col()) {
             dirty.push_back(last_cursor_row);
@@ -335,12 +326,45 @@ void UiApp::terminal_screen()
             last_cursor_row = terminal.cursor_row();
             last_cursor_col = terminal.cursor_col();
         }
-        if (!dirty.empty()) {
-            std::sort(dirty.begin(), dirty.end());
-            dirty.erase(std::unique(dirty.begin(), dirty.end()), dirty.end());
-            refresh_status_flags();
-            display_.draw_terminal_rows(terminal, dirty);
-            terminal.clear_dirty();
+        if (dirty.empty()) {
+            return;
+        }
+        std::sort(dirty.begin(), dirty.end());
+        dirty.erase(std::unique(dirty.begin(), dirty.end()), dirty.end());
+        refresh_status_flags();
+        display_.draw_terminal_rows(terminal, dirty);
+        terminal.clear_dirty();
+        last_draw_tick = xTaskGetTickCount();
+    };
+    auto flush_terminal_reply = [&]() {
+        std::string reply = terminal.take_pending_output();
+        if (!reply.empty()) {
+            ssh_.write_shell(reply);
+        }
+    };
+
+    while (true) {
+        bool got_output = false;
+        std::string output;
+        for (int i = 0; i < 2; ++i) {
+            if (ssh_.read_shell_chunk(output, 512) != ESP_OK) {
+                terminal.process("\r\nERR: " + ssh_.last_error() + "\r\n");
+                draw_dirty();
+                vTaskDelay(pdMS_TO_TICKS(1200));
+                return;
+            }
+            if (output.empty()) {
+                break;
+            }
+            got_output = true;
+            terminal.process(output);
+            flush_terminal_reply();
+        }
+
+        TickType_t now = xTaskGetTickCount();
+        if (!terminal.dirty_rows().empty() &&
+            (!got_output || last_draw_tick == 0 || (now - last_draw_tick) >= pdMS_TO_TICKS(50))) {
+            draw_dirty();
         }
 
         auto event = keyboard_.poll();
@@ -357,9 +381,16 @@ void UiApp::terminal_screen()
         } else {
             last_escape_tick = 0;
         }
-        std::string bytes = key_to_shell_bytes(*event);
+        std::string bytes = key_to_shell_bytes(*event, terminal.application_cursor_mode());
         if (!bytes.empty() && ssh_.write_shell(bytes) != ESP_OK) {
             terminal.process("\r\nERR: " + ssh_.last_error() + "\r\n");
+        } else if (bytes.size() == 1 && bytes[0] == '\x03') {
+            ssh_.send_signal("INT");
+        }
+        if (!got_output && !event.has_value()) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
 }
