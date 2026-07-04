@@ -15,11 +15,24 @@ constexpr uint32_t kDim = 0x8EA0A8;
 constexpr uint32_t kAccent = 0x18C7A6;
 constexpr uint32_t kWarn = 0xFFB000;
 constexpr int kTerminalTop = 20;
-constexpr int kCellWidth = 6;
-constexpr int kCellHeight = 12;
+constexpr int kDefaultCellWidth = 6;
+constexpr int kDefaultCellHeight = 12;
 
 bool g_wifi_connected = false;
 bool g_ssh_connected = false;
+
+uint32_t ansi_color(uint8_t color, bool bold);
+
+uint32_t dim_color(uint32_t color)
+{
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    r = static_cast<uint8_t>(r * 2 / 3);
+    g = static_cast<uint8_t>(g * 2 / 3);
+    b = static_cast<uint8_t>(b * 2 / 3);
+    return (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | b;
+}
 
 void use_ui_font()
 {
@@ -28,10 +41,14 @@ void use_ui_font()
     M5.Display.setTextWrap(false, false);
 }
 
-void use_terminal_font()
+void use_terminal_font(const TerminalLayout& layout)
 {
-    M5.Display.setFont(&fonts::Font0);
-    M5.Display.setTextSize(1);
+    if (layout.ascii_8x16) {
+        M5.Display.setFont(&fonts::AsciiFont8x16);
+    } else {
+        M5.Display.setFont(&fonts::Font0);
+    }
+    M5.Display.setTextSize(layout.ascii_size);
     M5.Display.setTextWrap(false, false);
 }
 
@@ -173,6 +190,64 @@ bool draw_efont_cn_glyph(uint32_t codepoint, int x, int y, uint32_t fg, int scal
     return true;
 }
 
+void draw_terminal_line(const std::vector<TerminalCell>& line, int row, const TerminalLayout& layout, bool show_cursor,
+                        int cursor_row, int cursor_col)
+{
+    int y = kTerminalTop + row * layout.cell_height;
+    for (int col = 0; col < layout.cols; ++col) {
+        const auto& cell = col < static_cast<int>(line.size()) ? line[col] : TerminalCell{};
+        bool cursor = show_cursor && row == cursor_row && col == cursor_col;
+        uint32_t fg = ansi_color(cell.fg, cell.bold);
+        uint32_t bg = ansi_color(cell.bg, false);
+        if (cell.dim && !cell.bold) {
+            fg = dim_color(fg);
+        }
+        if (cell.inverse || cursor) {
+            std::swap(fg, bg);
+        }
+        int x = col * layout.cell_width;
+        M5.Display.fillRect(x, y, layout.cell_width, layout.cell_height, bg);
+    }
+
+    use_terminal_font(layout);
+    for (int col = 0; col < layout.cols; ++col) {
+        const auto& cell = col < static_cast<int>(line.size()) ? line[col] : TerminalCell{};
+        if (cell.continuation) {
+            continue;
+        }
+        bool cursor = show_cursor && row == cursor_row && col == cursor_col;
+        uint32_t fg = ansi_color(cell.fg, cell.bold);
+        uint32_t bg = ansi_color(cell.bg, false);
+        if (cell.dim && !cell.bold) {
+            fg = dim_color(fg);
+        }
+        if (cell.inverse || cursor) {
+            std::swap(fg, bg);
+        }
+        if (cell.hidden && !cursor) {
+            fg = bg;
+        }
+        int x = col * layout.cell_width;
+        M5.Display.setTextColor(fg, bg);
+        M5.Display.setCursor(x, y);
+        uint32_t codepoint = cell.codepoint == 0 ? ' ' : cell.codepoint;
+        if (codepoint < 128) {
+            char out[2] = {static_cast<char>(codepoint), '\0'};
+            M5.Display.print(out);
+        } else if (!draw_efont_cn_glyph(codepoint, x, y, fg, layout.cjk_scale)) {
+            M5.Display.print("?");
+        }
+        if (cell.underline) {
+            int width = std::max<int>(1, cell.width) * layout.cell_width;
+            M5.Display.drawFastHLine(x, y + layout.cell_height - 2, width, fg);
+        }
+        if (cell.strikethrough) {
+            int width = std::max<int>(1, cell.width) * layout.cell_width;
+            M5.Display.drawFastHLine(x, y + layout.cell_height / 2, width, fg);
+        }
+    }
+}
+
 uint32_t ansi_color(uint8_t color, bool bold)
 {
     static constexpr uint32_t kNormal[] = {
@@ -242,6 +317,43 @@ void Display::set_status_flags(bool wifi_connected, bool ssh_connected)
 {
     g_wifi_connected = wifi_connected;
     g_ssh_connected = ssh_connected;
+}
+
+TerminalLayout Display::terminal_layout(TerminalFontMode mode) const
+{
+    TerminalLayout layout;
+    layout.mode = mode;
+
+    switch (mode) {
+        case TerminalFontMode::kReadable:
+            layout.cell_width = 8;
+            layout.cell_height = 16;
+            layout.ascii_size = 1;
+            layout.cjk_scale = 1;
+            layout.ascii_8x16 = true;
+            break;
+        case TerminalFontMode::kLarge:
+            layout.cell_width = 12;
+            layout.cell_height = 24;
+            layout.ascii_size = 2;
+            layout.cjk_scale = 2;
+            layout.ascii_8x16 = false;
+            break;
+        case TerminalFontMode::kCompact:
+        default:
+            layout.cell_width = kDefaultCellWidth;
+            layout.cell_height = kDefaultCellHeight;
+            layout.ascii_size = 1;
+            layout.cjk_scale = 1;
+            layout.ascii_8x16 = false;
+            break;
+    }
+
+    int width = std::max(1, static_cast<int>(M5.Display.width()));
+    int height = std::max(1, static_cast<int>(M5.Display.height()) - kTerminalTop);
+    layout.cols = std::max(8, width / layout.cell_width);
+    layout.rows = std::max(4, height / layout.cell_height);
+    return layout;
 }
 
 void Display::show_status(const std::string& title, const std::vector<std::string>& lines)
@@ -333,57 +445,46 @@ void Display::show_terminal(const std::vector<std::string>& lines, const std::st
 
 void Display::draw_terminal_frame()
 {
-    header("Terminal");
-    M5.Display.fillRect(0, kTerminalTop, M5.Display.width(), M5.Display.height() - kTerminalTop, 0x000000);
+    draw_terminal_frame(terminal_layout(TerminalFontMode::kCompact));
+}
+
+void Display::draw_terminal_frame(const TerminalLayout& layout, const std::string& title)
+{
+    header(title);
+    int terminal_height = layout.rows * layout.cell_height;
+    M5.Display.fillRect(0, kTerminalTop, M5.Display.width(), terminal_height, 0x000000);
+    int used_bottom = kTerminalTop + terminal_height;
+    if (used_bottom < M5.Display.height()) {
+        M5.Display.fillRect(0, used_bottom, M5.Display.width(), M5.Display.height() - used_bottom, kBg);
+    }
 }
 
 void Display::draw_terminal_rows(const TerminalEmulator& terminal, const std::vector<int>& rows)
 {
+    draw_terminal_rows(terminal, rows, terminal_layout(TerminalFontMode::kCompact));
+}
+
+void Display::draw_terminal_rows(const TerminalEmulator& terminal, const std::vector<int>& rows,
+                                 const TerminalLayout& layout)
+{
     draw_header_status();
     for (int row : rows) {
-        if (row < 0 || row >= TerminalEmulator::kRows) {
+        if (row < 0 || row >= terminal.rows() || row >= layout.rows) {
             continue;
         }
-        int y = kTerminalTop + row * kCellHeight;
-        for (int col = 0; col < TerminalEmulator::kCols; ++col) {
-            const auto& cell = terminal.cell(row, col);
-            bool cursor = terminal.cursor_visible() && row == terminal.cursor_row() && col == terminal.cursor_col();
-            uint32_t fg = ansi_color(cell.fg, cell.bold);
-            uint32_t bg = ansi_color(cell.bg, false);
-            if (cell.inverse || cursor) {
-                std::swap(fg, bg);
-            }
-            int x = col * kCellWidth;
-            M5.Display.fillRect(x, y, kCellWidth, kCellHeight, bg);
-        }
+        draw_terminal_line(terminal.line(row), row, layout, terminal.cursor_visible(), terminal.cursor_row(),
+                           terminal.cursor_col());
+    }
+}
 
-        use_terminal_font();
-        for (int col = 0; col < TerminalEmulator::kCols; ++col) {
-            const auto& cell = terminal.cell(row, col);
-            if (cell.continuation) {
-                continue;
-            }
-            bool cursor = terminal.cursor_visible() && row == terminal.cursor_row() && col == terminal.cursor_col();
-            uint32_t fg = ansi_color(cell.fg, cell.bold);
-            uint32_t bg = ansi_color(cell.bg, false);
-            if (cell.inverse || cursor) {
-                std::swap(fg, bg);
-            }
-            int x = col * kCellWidth;
-            M5.Display.setTextColor(fg, bg);
-            M5.Display.setCursor(x, y);
-            uint32_t codepoint = cell.codepoint == 0 ? ' ' : cell.codepoint;
-            if (codepoint < 128) {
-                char out[2] = {static_cast<char>(codepoint), '\0'};
-                M5.Display.print(out);
-            } else if (!draw_efont_cn_glyph(codepoint, x, y, fg)) {
-                M5.Display.print("?");
-            }
-            if (cell.underline) {
-                int width = std::max<int>(1, cell.width) * kCellWidth;
-                M5.Display.drawFastHLine(x, y + kCellHeight - 2, width, fg);
-            }
-        }
+void Display::draw_terminal_snapshot(const std::vector<std::vector<TerminalCell>>& lines,
+                                     const TerminalLayout& layout)
+{
+    draw_header_status();
+    for (int row = 0; row < layout.rows; ++row) {
+        const auto blank = std::vector<TerminalCell>(layout.cols);
+        const auto& line = row < static_cast<int>(lines.size()) ? lines[row] : blank;
+        draw_terminal_line(line, row, layout, false, -1, -1);
     }
 }
 

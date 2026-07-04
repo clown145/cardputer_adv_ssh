@@ -105,6 +105,52 @@ std::string key_to_shell_bytes(const KeyEvent& event, bool application_cursor)
             return {};
     }
 }
+
+TerminalFontMode adjusted_font_mode(TerminalFontMode mode, int delta)
+{
+    int value = 0;
+    switch (mode) {
+        case TerminalFontMode::kReadable:
+            value = 1;
+            break;
+        case TerminalFontMode::kLarge:
+            value = 2;
+            break;
+        case TerminalFontMode::kCompact:
+        default:
+            value = 0;
+            break;
+    }
+    value = std::clamp(value + delta, 0, 2);
+    if (value == 2) {
+        return TerminalFontMode::kLarge;
+    }
+    if (value == 1) {
+        return TerminalFontMode::kReadable;
+    }
+    return TerminalFontMode::kCompact;
+}
+
+bool is_review_up_key(const KeyEvent& event)
+{
+    return event.kind == KeyKind::kUp || (event.kind == KeyKind::kCharacter && event.character == ';');
+}
+
+bool is_review_down_key(const KeyEvent& event)
+{
+    return event.kind == KeyKind::kDown || (event.kind == KeyKind::kCharacter && event.character == '.');
+}
+
+int review_font_delta(const KeyEvent& event)
+{
+    if (event.kind == KeyKind::kLeft || (event.kind == KeyKind::kCharacter && event.character == ',')) {
+        return -1;
+    }
+    if (event.kind == KeyKind::kRight || (event.kind == KeyKind::kCharacter && event.character == '/')) {
+        return 1;
+    }
+    return 0;
+}
 }  // namespace
 
 UiApp::UiApp(Display& display, Keyboard& keyboard, SettingsStore& store, WifiManager& wifi, SshClient& ssh)
@@ -301,24 +347,37 @@ void UiApp::terminal_screen()
         return;
     }
 
-    if (ssh_.open_shell(TerminalEmulator::kCols, TerminalEmulator::kRows) != ESP_OK) {
+    TerminalFontMode font_mode = TerminalFontMode::kCompact;
+    TerminalLayout layout = display_.terminal_layout(font_mode);
+
+    if (ssh_.open_shell(layout.cols, layout.rows) != ESP_OK) {
         pause("Terminal", {"Shell failed", ssh_.last_error()});
         return;
     }
 
-    TerminalEmulator terminal;
+    TerminalEmulator terminal(layout.cols, layout.rows, 300);
     terminal.mark_all_dirty();
     refresh_status_flags();
-    display_.draw_terminal_frame();
-    display_.draw_terminal_rows(terminal, terminal.dirty_rows());
-    terminal.clear_dirty();
 
     int last_cursor_row = terminal.cursor_row();
     int last_cursor_col = terminal.cursor_col();
     TickType_t last_escape_tick = 0;
     TickType_t last_draw_tick = 0;
+    bool review_mode = false;
+    int scroll_offset = 0;
+
+    auto live_title = [&]() {
+        return "Terminal " + std::to_string(layout.cols) + "x" + std::to_string(layout.rows);
+    };
+    auto review_title = [&]() {
+        return "Review " + std::to_string(scroll_offset) + "/" +
+               std::to_string(terminal.max_scrollback_offset());
+    };
 
     auto draw_dirty = [&]() {
+        if (review_mode) {
+            return;
+        }
         auto dirty = terminal.dirty_rows();
         if (last_cursor_row != terminal.cursor_row() || last_cursor_col != terminal.cursor_col()) {
             dirty.push_back(last_cursor_row);
@@ -332,9 +391,42 @@ void UiApp::terminal_screen()
         std::sort(dirty.begin(), dirty.end());
         dirty.erase(std::unique(dirty.begin(), dirty.end()), dirty.end());
         refresh_status_flags();
-        display_.draw_terminal_rows(terminal, dirty);
+        display_.draw_terminal_rows(terminal, dirty, layout);
         terminal.clear_dirty();
         last_draw_tick = xTaskGetTickCount();
+    };
+    auto draw_review = [&]() {
+        refresh_status_flags();
+        display_.draw_terminal_frame(layout, review_title());
+        display_.draw_terminal_snapshot(terminal.scrollback_snapshot(scroll_offset), layout);
+        last_draw_tick = xTaskGetTickCount();
+    };
+    auto redraw_live = [&]() {
+        refresh_status_flags();
+        display_.draw_terminal_frame(layout, live_title());
+        terminal.mark_all_dirty();
+        draw_dirty();
+    };
+    auto apply_layout = [&](TerminalFontMode next_mode) {
+        TerminalLayout next_layout = display_.terminal_layout(next_mode);
+        if (next_layout.cols == layout.cols && next_layout.rows == layout.rows &&
+            next_layout.cell_width == layout.cell_width && next_layout.cell_height == layout.cell_height) {
+            return;
+        }
+        font_mode = next_mode;
+        layout = next_layout;
+        terminal.resize(layout.cols, layout.rows);
+        last_cursor_row = terminal.cursor_row();
+        last_cursor_col = terminal.cursor_col();
+        scroll_offset = std::min(scroll_offset, terminal.max_scrollback_offset());
+        if (ssh_.resize_shell(layout.cols, layout.rows) != ESP_OK) {
+            terminal.process("\r\nWARN: " + ssh_.last_error() + "\r\n");
+        }
+        if (review_mode) {
+            draw_review();
+        } else {
+            redraw_live();
+        }
     };
     auto flush_terminal_reply = [&]() {
         std::string reply = terminal.take_pending_output();
@@ -343,11 +435,13 @@ void UiApp::terminal_screen()
         }
     };
 
+    redraw_live();
+
     while (true) {
         bool got_output = false;
         std::string output;
-        for (int i = 0; i < 2; ++i) {
-            if (ssh_.read_shell_chunk(output, 512) != ESP_OK) {
+        for (int i = 0; i < 4; ++i) {
+            if (ssh_.read_shell_chunk(output, 1024) != ESP_OK) {
                 terminal.process("\r\nERR: " + ssh_.last_error() + "\r\n");
                 draw_dirty();
                 vTaskDelay(pdMS_TO_TICKS(1200));
@@ -357,7 +451,13 @@ void UiApp::terminal_screen()
                 break;
             }
             got_output = true;
+            int scrollback_before = terminal.scrollback_size();
             terminal.process(output);
+            int scrollback_after = terminal.scrollback_size();
+            if (review_mode && scrollback_after > scrollback_before) {
+                scroll_offset += scrollback_after - scrollback_before;
+                scroll_offset = std::min(scroll_offset, terminal.max_scrollback_offset());
+            }
             flush_terminal_reply();
         }
 
@@ -372,12 +472,61 @@ void UiApp::terminal_screen()
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
+        if (review_mode) {
+            if (event->kind == KeyKind::kEscape) {
+                TickType_t now = xTaskGetTickCount();
+                if (last_escape_tick != 0 && (now - last_escape_tick) < pdMS_TO_TICKS(650)) {
+                    return;
+                }
+                review_mode = false;
+                scroll_offset = 0;
+                last_escape_tick = now;
+                redraw_live();
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
+            last_escape_tick = 0;
+            bool redraw = false;
+            if (event->kind == KeyKind::kEnter) {
+                review_mode = false;
+                scroll_offset = 0;
+                redraw_live();
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
+            if (is_review_up_key(*event)) {
+                scroll_offset = std::min(scroll_offset + layout.rows, terminal.max_scrollback_offset());
+                redraw = true;
+            } else if (is_review_down_key(*event)) {
+                scroll_offset = std::max(0, scroll_offset - layout.rows);
+                redraw = true;
+            } else {
+                int font_delta = review_font_delta(*event);
+                if (font_delta != 0) {
+                    apply_layout(adjusted_font_mode(font_mode, font_delta));
+                    vTaskDelay(pdMS_TO_TICKS(1));
+                    continue;
+                }
+            }
+            if (redraw) {
+                draw_review();
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
         if (event->kind == KeyKind::kEscape) {
             TickType_t now = xTaskGetTickCount();
             if (last_escape_tick != 0 && (now - last_escape_tick) < pdMS_TO_TICKS(650)) {
                 return;
             }
             last_escape_tick = now;
+            if (terminal.max_scrollback_offset() > 0) {
+                review_mode = true;
+                scroll_offset = 0;
+                draw_review();
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
         } else {
             last_escape_tick = 0;
         }
@@ -387,11 +536,7 @@ void UiApp::terminal_screen()
         } else if (bytes.size() == 1 && bytes[0] == '\x03') {
             ssh_.send_signal("INT");
         }
-        if (!got_output && !event.has_value()) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
+        vTaskDelay(pdMS_TO_TICKS(got_output ? 1 : 10));
     }
 }
 

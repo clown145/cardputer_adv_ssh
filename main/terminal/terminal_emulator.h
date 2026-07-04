@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,9 @@ struct TerminalCell {
     bool bold = false;
     bool inverse = false;
     bool underline = false;
+    bool dim = false;
+    bool hidden = false;
+    bool strikethrough = false;
     bool continuation = false;
 };
 
@@ -23,20 +27,27 @@ public:
     static constexpr int kCols = 40;
     static constexpr int kRows = 9;
 
-    TerminalEmulator();
+    TerminalEmulator(int cols = kCols, int rows = kRows, size_t scrollback_lines = 400);
 
     void reset();
+    void resize(int cols, int rows);
     void process(const std::string& bytes);
     std::string take_pending_output();
     void mark_all_dirty();
     void clear_dirty();
 
     const TerminalCell& cell(int row, int col) const;
+    std::vector<TerminalCell> line(int row) const;
+    std::vector<std::vector<TerminalCell>> scrollback_snapshot(int offset) const;
     std::vector<int> dirty_rows() const;
+    int cols() const;
+    int rows() const;
     int cursor_row() const;
     int cursor_col() const;
     bool cursor_visible() const;
     bool application_cursor_mode() const;
+    int scrollback_size() const;
+    int max_scrollback_offset() const;
 
 private:
     enum class ParserState {
@@ -56,6 +67,10 @@ private:
     std::vector<TerminalCell>& active_cells();
     const std::vector<TerminalCell>& active_cells() const;
     TerminalCell& active_cell(int row, int col);
+    const TerminalCell& active_cell(int row, int col) const;
+    size_t cell_index(int row, int col) const;
+    std::vector<TerminalCell> blank_line() const;
+    void append_scrollback_line(const std::vector<TerminalCell>& line);
     void mark_dirty(int row);
     void put_char(char ch);
     void put_codepoint(uint32_t codepoint);
@@ -67,6 +82,11 @@ private:
     void carriage_return();
     void backspace();
     void tab();
+    void reset_tab_stops();
+    void set_tab_stop();
+    void clear_tab_stop(int col);
+    void clear_all_tab_stops();
+    int next_tab_stop() const;
     void scroll_up(int top, int bottom, int count);
     void scroll_down(int top, int bottom, int count);
     void clear_cells(int row_start, int col_start, int row_end, int col_end);
@@ -95,9 +115,14 @@ private:
     int param(size_t index, int fallback) const;
     bool private_param(int value) const;
 
+    int cols_ = kCols;
+    int rows_ = kRows;
+    size_t max_scrollback_lines_ = 400;
     std::vector<TerminalCell> main_cells_;
     std::vector<TerminalCell> alt_cells_;
     std::vector<bool> dirty_;
+    std::vector<std::vector<TerminalCell>> scrollback_;
+    std::vector<bool> tab_stops_;
     bool alt_active_ = false;
     ParserState state_ = ParserState::kGround;
     CursorState cursor_;

@@ -139,23 +139,32 @@ uint32_t drawable_codepoint(uint32_t codepoint, int width)
 }
 }  // namespace
 
-TerminalEmulator::TerminalEmulator()
-    : main_cells_(kRows * kCols), alt_cells_(kRows * kCols), dirty_(kRows, true)
+TerminalEmulator::TerminalEmulator(int cols, int rows, size_t scrollback_lines)
+    : cols_(clamp_int(cols, 8, 80)),
+      rows_(clamp_int(rows, 4, 24)),
+      max_scrollback_lines_(scrollback_lines),
+      main_cells_(rows_ * cols_),
+      alt_cells_(rows_ * cols_),
+      dirty_(rows_, true),
+      tab_stops_(cols_, false)
 {
     reset_style();
+    scroll_bottom_ = rows_ - 1;
+    reset_tab_stops();
 }
 
 void TerminalEmulator::reset()
 {
     std::fill(main_cells_.begin(), main_cells_.end(), kBlank);
     std::fill(alt_cells_.begin(), alt_cells_.end(), kBlank);
+    scrollback_.clear();
     alt_active_ = false;
     state_ = ParserState::kGround;
     cursor_ = {};
     saved_cursor_ = {};
     saved_main_cursor_ = {};
     scroll_top_ = 0;
-    scroll_bottom_ = kRows - 1;
+    scroll_bottom_ = rows_ - 1;
     cursor_visible_ = true;
     auto_wrap_ = true;
     wrap_pending_ = false;
@@ -171,8 +180,49 @@ void TerminalEmulator::reset()
     utf8_codepoint_ = 0;
     utf8_remaining_ = 0;
     utf8_expected_ = 0;
+    reset_tab_stops();
     reset_style();
     mark_all_dirty();
+}
+
+void TerminalEmulator::resize(int cols, int rows)
+{
+    cols = clamp_int(cols, 8, 80);
+    rows = clamp_int(rows, 4, 24);
+    if (cols == cols_ && rows == rows_) {
+        return;
+    }
+
+    auto resize_cells = [&](const std::vector<TerminalCell>& old_cells) {
+        std::vector<TerminalCell> next(rows * cols, kBlank);
+        int copy_rows = std::min(rows_, rows);
+        int copy_cols = std::min(cols_, cols);
+        for (int row = 0; row < copy_rows; ++row) {
+            for (int col = 0; col < copy_cols; ++col) {
+                next[row * cols + col] = old_cells[row * cols_ + col];
+            }
+        }
+        return next;
+    };
+
+    main_cells_ = resize_cells(main_cells_);
+    alt_cells_ = resize_cells(alt_cells_);
+    cols_ = cols;
+    rows_ = rows;
+    dirty_.assign(rows_, true);
+    tab_stops_.assign(cols_, false);
+    reset_tab_stops();
+    scroll_top_ = 0;
+    scroll_bottom_ = rows_ - 1;
+    set_cursor(std::min(cursor_.row, rows_ - 1), std::min(cursor_.col, cols_ - 1));
+    saved_cursor_.row = clamp_int(saved_cursor_.row, 0, rows_ - 1);
+    saved_cursor_.col = clamp_int(saved_cursor_.col, 0, cols_ - 1);
+    saved_main_cursor_.row = clamp_int(saved_main_cursor_.row, 0, rows_ - 1);
+    saved_main_cursor_.col = clamp_int(saved_main_cursor_.col, 0, cols_ - 1);
+
+    for (auto& line : scrollback_) {
+        line.resize(cols_, kBlank);
+    }
 }
 
 void TerminalEmulator::process(const std::string& bytes)
@@ -182,6 +232,10 @@ void TerminalEmulator::process(const std::string& bytes)
             case ParserState::kGround:
                 if (ch == 0x1B) {
                     state_ = ParserState::kEsc;
+                } else if (ch == 0x9B) {
+                    begin_csi();
+                } else if (ch == 0x90 || ch == 0x9D || ch == 0x9E || ch == 0x9F) {
+                    state_ = ParserState::kOsc;
                 } else if (ch == 0x0E || ch == 0x0F) {
                     // Shift-out/shift-in selects alternate character sets on VT terminals.
                     // We render ASCII only, so the state change is intentionally ignored.
@@ -241,18 +295,60 @@ std::string TerminalEmulator::take_pending_output()
 
 const TerminalCell& TerminalEmulator::cell(int row, int col) const
 {
-    return active_cells()[row * kCols + col];
+    return active_cells()[cell_index(row, col)];
+}
+
+std::vector<TerminalCell> TerminalEmulator::line(int row) const
+{
+    std::vector<TerminalCell> out(cols_, kBlank);
+    if (row < 0 || row >= rows_) {
+        return out;
+    }
+    for (int col = 0; col < cols_; ++col) {
+        out[col] = active_cell(row, col);
+    }
+    return out;
+}
+
+std::vector<std::vector<TerminalCell>> TerminalEmulator::scrollback_snapshot(int offset) const
+{
+    offset = clamp_int(offset, 0, max_scrollback_offset());
+    std::vector<std::vector<TerminalCell>> combined;
+    combined.reserve(scrollback_.size() + rows_);
+    combined.insert(combined.end(), scrollback_.begin(), scrollback_.end());
+    for (int row = 0; row < rows_; ++row) {
+        combined.push_back(line(row));
+    }
+
+    std::vector<std::vector<TerminalCell>> view(rows_, blank_line());
+    int total = static_cast<int>(combined.size());
+    int start = std::max(0, total - rows_ - offset);
+    for (int row = 0; row < rows_ && start + row < total; ++row) {
+        view[row] = combined[start + row];
+        view[row].resize(cols_, kBlank);
+    }
+    return view;
 }
 
 std::vector<int> TerminalEmulator::dirty_rows() const
 {
     std::vector<int> rows;
-    for (int row = 0; row < kRows; ++row) {
+    for (int row = 0; row < rows_; ++row) {
         if (dirty_[row]) {
             rows.push_back(row);
         }
     }
     return rows;
+}
+
+int TerminalEmulator::cols() const
+{
+    return cols_;
+}
+
+int TerminalEmulator::rows() const
+{
+    return rows_;
 }
 
 int TerminalEmulator::cursor_row() const
@@ -275,6 +371,16 @@ bool TerminalEmulator::application_cursor_mode() const
     return application_cursor_mode_;
 }
 
+int TerminalEmulator::scrollback_size() const
+{
+    return static_cast<int>(scrollback_.size());
+}
+
+int TerminalEmulator::max_scrollback_offset() const
+{
+    return static_cast<int>(scrollback_.size());
+}
+
 std::vector<TerminalCell>& TerminalEmulator::active_cells()
 {
     return alt_active_ ? alt_cells_ : main_cells_;
@@ -287,12 +393,40 @@ const std::vector<TerminalCell>& TerminalEmulator::active_cells() const
 
 TerminalCell& TerminalEmulator::active_cell(int row, int col)
 {
-    return active_cells()[row * kCols + col];
+    return active_cells()[cell_index(row, col)];
+}
+
+const TerminalCell& TerminalEmulator::active_cell(int row, int col) const
+{
+    return active_cells()[cell_index(row, col)];
+}
+
+size_t TerminalEmulator::cell_index(int row, int col) const
+{
+    return static_cast<size_t>(row * cols_ + col);
+}
+
+std::vector<TerminalCell> TerminalEmulator::blank_line() const
+{
+    return std::vector<TerminalCell>(cols_, kBlank);
+}
+
+void TerminalEmulator::append_scrollback_line(const std::vector<TerminalCell>& line)
+{
+    if (max_scrollback_lines_ == 0 || alt_active_) {
+        return;
+    }
+    std::vector<TerminalCell> normalized = line;
+    normalized.resize(cols_, kBlank);
+    scrollback_.push_back(normalized);
+    if (scrollback_.size() > max_scrollback_lines_) {
+        scrollback_.erase(scrollback_.begin(), scrollback_.begin() + (scrollback_.size() - max_scrollback_lines_));
+    }
 }
 
 void TerminalEmulator::mark_dirty(int row)
 {
-    if (row >= 0 && row < kRows) {
+    if (row >= 0 && row < rows_) {
         dirty_[row] = true;
     }
 }
@@ -346,16 +480,16 @@ void TerminalEmulator::put_glyph(uint32_t codepoint, int width)
         line_feed();
         wrap_pending_ = false;
     }
-    if (width == 2 && cursor_.col == kCols - 1) {
+    if (width == 2 && cursor_.col == cols_ - 1) {
         cursor_.col = 0;
         line_feed();
     }
     if (insert_mode_) {
-        for (int col = kCols - 1; col >= cursor_.col + width; --col) {
+        for (int col = cols_ - 1; col >= cursor_.col + width; --col) {
             active_cell(cursor_.row, col) = active_cell(cursor_.row, col - width);
         }
     }
-    for (int col = cursor_.col; col < cursor_.col + width && col < kCols; ++col) {
+    for (int col = cursor_.col; col < cursor_.col + width && col < cols_; ++col) {
         clear_wide_fragment(cursor_.row, col);
     }
     active_cell(cursor_.row, cursor_.col) = style_;
@@ -365,7 +499,7 @@ void TerminalEmulator::put_glyph(uint32_t codepoint, int width)
     active_cell(cursor_.row, cursor_.col).continuation = false;
     last_printed_codepoint_ = codepoint;
     last_printed_width_ = width;
-    if (width == 2 && cursor_.col + 1 < kCols) {
+    if (width == 2 && cursor_.col + 1 < cols_) {
         active_cell(cursor_.row, cursor_.col + 1) = style_;
         active_cell(cursor_.row, cursor_.col + 1).codepoint = ' ';
         active_cell(cursor_.row, cursor_.col + 1).ch = ' ';
@@ -373,8 +507,8 @@ void TerminalEmulator::put_glyph(uint32_t codepoint, int width)
         active_cell(cursor_.row, cursor_.col + 1).continuation = true;
     }
     mark_dirty(cursor_.row);
-    if (cursor_.col + width >= kCols) {
-        cursor_.col = kCols - 1;
+    if (cursor_.col + width >= cols_) {
+        cursor_.col = cols_ - 1;
         wrap_pending_ = auto_wrap_;
     } else {
         cursor_.col += width;
@@ -383,13 +517,13 @@ void TerminalEmulator::put_glyph(uint32_t codepoint, int width)
 
 void TerminalEmulator::clear_wide_fragment(int row, int col)
 {
-    if (row < 0 || row >= kRows || col < 0 || col >= kCols) {
+    if (row < 0 || row >= rows_ || col < 0 || col >= cols_) {
         return;
     }
     TerminalCell& cell = active_cell(row, col);
     if (cell.continuation && col > 0) {
         active_cell(row, col - 1) = kBlank;
-    } else if (!cell.continuation && cell.width == 2 && col + 1 < kCols) {
+    } else if (!cell.continuation && cell.width == 2 && col + 1 < cols_) {
         active_cell(row, col + 1) = kBlank;
     }
     cell = kBlank;
@@ -442,7 +576,7 @@ void TerminalEmulator::line_feed()
 {
     if (cursor_.row == scroll_bottom_) {
         scroll_up(scroll_top_, scroll_bottom_, 1);
-    } else if (cursor_.row < kRows - 1) {
+    } else if (cursor_.row < rows_ - 1) {
         ++cursor_.row;
     }
 }
@@ -473,25 +607,74 @@ void TerminalEmulator::backspace()
 void TerminalEmulator::tab()
 {
     wrap_pending_ = false;
-    int next = ((cursor_.col / 4) + 1) * 4;
-    cursor_.col = clamp_int(next, 0, kCols - 1);
+    cursor_.col = next_tab_stop();
+}
+
+void TerminalEmulator::reset_tab_stops()
+{
+    if (tab_stops_.size() != static_cast<size_t>(cols_)) {
+        tab_stops_.assign(cols_, false);
+    } else {
+        std::fill(tab_stops_.begin(), tab_stops_.end(), false);
+    }
+    for (int col = 8; col < cols_; col += 8) {
+        tab_stops_[col] = true;
+    }
+}
+
+void TerminalEmulator::set_tab_stop()
+{
+    if (cursor_.col >= 0 && cursor_.col < cols_) {
+        tab_stops_[cursor_.col] = true;
+    }
+}
+
+void TerminalEmulator::clear_tab_stop(int col)
+{
+    if (col >= 0 && col < cols_) {
+        tab_stops_[col] = false;
+    }
+}
+
+void TerminalEmulator::clear_all_tab_stops()
+{
+    std::fill(tab_stops_.begin(), tab_stops_.end(), false);
+}
+
+int TerminalEmulator::next_tab_stop() const
+{
+    for (int col = cursor_.col + 1; col < cols_; ++col) {
+        if (tab_stops_[col]) {
+            return col;
+        }
+    }
+    return cols_ - 1;
 }
 
 void TerminalEmulator::scroll_up(int top, int bottom, int count)
 {
-    top = clamp_int(top, 0, kRows - 1);
-    bottom = clamp_int(bottom, top, kRows - 1);
+    top = clamp_int(top, 0, rows_ - 1);
+    bottom = clamp_int(bottom, top, rows_ - 1);
     count = clamp_int(count, 1, bottom - top + 1);
     auto& cells = active_cells();
+    if (!alt_active_ && top == 0 && bottom == rows_ - 1) {
+        for (int row = 0; row < count; ++row) {
+            std::vector<TerminalCell> pushed(cols_, kBlank);
+            for (int col = 0; col < cols_; ++col) {
+                pushed[col] = cells[row * cols_ + col];
+            }
+            append_scrollback_line(pushed);
+        }
+    }
     for (int row = top; row <= bottom - count; ++row) {
-        for (int col = 0; col < kCols; ++col) {
-            cells[row * kCols + col] = cells[(row + count) * kCols + col];
+        for (int col = 0; col < cols_; ++col) {
+            cells[row * cols_ + col] = cells[(row + count) * cols_ + col];
         }
         mark_dirty(row);
     }
     for (int row = bottom - count + 1; row <= bottom; ++row) {
-        for (int col = 0; col < kCols; ++col) {
-            cells[row * kCols + col] = kBlank;
+        for (int col = 0; col < cols_; ++col) {
+            cells[row * cols_ + col] = kBlank;
         }
         mark_dirty(row);
     }
@@ -499,19 +682,19 @@ void TerminalEmulator::scroll_up(int top, int bottom, int count)
 
 void TerminalEmulator::scroll_down(int top, int bottom, int count)
 {
-    top = clamp_int(top, 0, kRows - 1);
-    bottom = clamp_int(bottom, top, kRows - 1);
+    top = clamp_int(top, 0, rows_ - 1);
+    bottom = clamp_int(bottom, top, rows_ - 1);
     count = clamp_int(count, 1, bottom - top + 1);
     auto& cells = active_cells();
     for (int row = bottom; row >= top + count; --row) {
-        for (int col = 0; col < kCols; ++col) {
-            cells[row * kCols + col] = cells[(row - count) * kCols + col];
+        for (int col = 0; col < cols_; ++col) {
+            cells[row * cols_ + col] = cells[(row - count) * cols_ + col];
         }
         mark_dirty(row);
     }
     for (int row = top; row < top + count; ++row) {
-        for (int col = 0; col < kCols; ++col) {
-            cells[row * kCols + col] = kBlank;
+        for (int col = 0; col < cols_; ++col) {
+            cells[row * cols_ + col] = kBlank;
         }
         mark_dirty(row);
     }
@@ -519,16 +702,16 @@ void TerminalEmulator::scroll_down(int top, int bottom, int count)
 
 void TerminalEmulator::clear_cells(int row_start, int col_start, int row_end, int col_end)
 {
-    row_start = clamp_int(row_start, 0, kRows - 1);
-    row_end = clamp_int(row_end, 0, kRows - 1);
-    col_start = clamp_int(col_start, 0, kCols - 1);
-    col_end = clamp_int(col_end, 0, kCols - 1);
+    row_start = clamp_int(row_start, 0, rows_ - 1);
+    row_end = clamp_int(row_end, 0, rows_ - 1);
+    col_start = clamp_int(col_start, 0, cols_ - 1);
+    col_end = clamp_int(col_end, 0, cols_ - 1);
     if (row_start > row_end) {
         std::swap(row_start, row_end);
     }
     for (int row = row_start; row <= row_end; ++row) {
         int first = row == row_start ? col_start : 0;
-        int last = row == row_end ? col_end : kCols - 1;
+        int last = row == row_end ? col_end : cols_ - 1;
         for (int col = first; col <= last; ++col) {
             active_cell(row, col) = kBlank;
         }
@@ -541,9 +724,9 @@ void TerminalEmulator::clear_line(int mode)
     if (mode == 1) {
         clear_cells(cursor_.row, 0, cursor_.row, cursor_.col);
     } else if (mode == 2) {
-        clear_cells(cursor_.row, 0, cursor_.row, kCols - 1);
+        clear_cells(cursor_.row, 0, cursor_.row, cols_ - 1);
     } else {
-        clear_cells(cursor_.row, cursor_.col, cursor_.row, kCols - 1);
+        clear_cells(cursor_.row, cursor_.col, cursor_.row, cols_ - 1);
     }
 }
 
@@ -552,17 +735,17 @@ void TerminalEmulator::clear_screen(int mode)
     if (mode == 1) {
         clear_cells(0, 0, cursor_.row, cursor_.col);
     } else if (mode == 2 || mode == 3) {
-        clear_cells(0, 0, kRows - 1, kCols - 1);
+        clear_cells(0, 0, rows_ - 1, cols_ - 1);
     } else {
-        clear_cells(cursor_.row, cursor_.col, kRows - 1, kCols - 1);
+        clear_cells(cursor_.row, cursor_.col, rows_ - 1, cols_ - 1);
     }
 }
 
 void TerminalEmulator::set_cursor(int row, int col)
 {
     wrap_pending_ = false;
-    cursor_.row = clamp_int(row, 0, kRows - 1);
-    cursor_.col = clamp_int(col, 0, kCols - 1);
+    cursor_.row = clamp_int(row, 0, rows_ - 1);
+    cursor_.col = clamp_int(col, 0, cols_ - 1);
 }
 
 void TerminalEmulator::move_cursor(int row_delta, int col_delta)
@@ -573,12 +756,12 @@ void TerminalEmulator::move_cursor(int row_delta, int col_delta)
 
 void TerminalEmulator::set_scroll_region(int top, int bottom)
 {
-    if (top >= 0 && bottom > top && bottom < kRows) {
+    if (top >= 0 && bottom > top && bottom < rows_) {
         scroll_top_ = top;
         scroll_bottom_ = bottom;
     } else {
         scroll_top_ = 0;
-        scroll_bottom_ = kRows - 1;
+        scroll_bottom_ = rows_ - 1;
     }
     set_cursor(0, 0);
 }
@@ -611,15 +794,28 @@ void TerminalEmulator::apply_sgr()
         if (value == 0) {
             reset_style();
         } else if (value == 2) {
-            style_.bold = false;
+            style_.dim = true;
+        } else if (value == 3) {
+            // Italic has no separate LCD rendering on the built-in fonts.
         } else if (value == 1) {
             style_.bold = true;
         } else if (value == 4) {
             style_.underline = true;
+        } else if (value == 8) {
+            style_.hidden = true;
+        } else if (value == 9) {
+            style_.strikethrough = true;
         } else if (value == 22) {
             style_.bold = false;
+            style_.dim = false;
+        } else if (value == 23) {
+            // Italic reset.
         } else if (value == 24) {
             style_.underline = false;
+        } else if (value == 28) {
+            style_.hidden = false;
+        } else if (value == 29) {
+            style_.strikethrough = false;
         } else if (value == 7) {
             style_.inverse = true;
         } else if (value == 27) {
@@ -691,6 +887,8 @@ void TerminalEmulator::apply_mode(bool enabled)
                 wrap_pending_ = false;
             }
         }
+        // Bracketed paste, focus events, and mouse reporting are accepted as
+        // no-ops. This firmware has no paste buffer or pointer input.
         if (enabled) {
             if (private_param(47) || private_param(1047)) {
                 enter_alt_screen(false);
@@ -725,7 +923,7 @@ void TerminalEmulator::enter_alt_screen(bool save)
     clear_active_screen();
     cursor_ = {};
     scroll_top_ = 0;
-    scroll_bottom_ = kRows - 1;
+    scroll_bottom_ = rows_ - 1;
     mark_all_dirty();
 }
 
@@ -736,7 +934,7 @@ void TerminalEmulator::leave_alt_screen(bool restore)
         cursor_ = saved_main_cursor_;
     }
     scroll_top_ = 0;
-    scroll_bottom_ = kRows - 1;
+    scroll_bottom_ = rows_ - 1;
     mark_all_dirty();
 }
 
@@ -798,6 +996,8 @@ void TerminalEmulator::handle_escape(uint8_t ch)
         line_feed();
     } else if (ch == 'M') {
         reverse_index();
+    } else if (ch == 'H') {
+        set_tab_stop();
     } else if (ch == 'E') {
         line_feed();
         carriage_return();
@@ -907,17 +1107,26 @@ void TerminalEmulator::dispatch_csi(uint8_t final)
             scroll_up(cursor_.row, scroll_bottom_, count);
             break;
         case 'P':
-            for (int col = cursor_.col; col < kCols; ++col) {
+            for (int col = cursor_.col; col < cols_; ++col) {
                 int src = col + count;
-                active_cell(cursor_.row, col) = src < kCols ? active_cell(cursor_.row, src) : kBlank;
+                active_cell(cursor_.row, col) = src < cols_ ? active_cell(cursor_.row, src) : kBlank;
             }
             mark_dirty(cursor_.row);
             break;
         case 'Z':
-            cursor_.col = clamp_int(cursor_.col - count * 4, 0, kCols - 1);
+            for (int i = 0; i < count; ++i) {
+                int previous = 0;
+                for (int col = cursor_.col - 1; col > 0; --col) {
+                    if (tab_stops_[col]) {
+                        previous = col;
+                        break;
+                    }
+                }
+                cursor_.col = previous;
+            }
             break;
         case '@':
-            for (int col = kCols - 1; col >= cursor_.col; --col) {
+            for (int col = cols_ - 1; col >= cursor_.col; --col) {
                 int src = col - count;
                 active_cell(cursor_.row, col) = src >= cursor_.col ? active_cell(cursor_.row, src) : kBlank;
             }
@@ -954,6 +1163,11 @@ void TerminalEmulator::dispatch_csi(uint8_t final)
             move_cursor(count, 0);
             break;
         case 'g':
+            if (param(0, 0) == 3) {
+                clear_all_tab_stops();
+            } else {
+                clear_tab_stop(cursor_.col);
+            }
             break;
         case 'm':
             apply_sgr();
@@ -969,7 +1183,7 @@ void TerminalEmulator::dispatch_csi(uint8_t final)
             break;
         case 'r': {
             int top = param(0, 1) - 1;
-            int bottom = param(1, kRows) - 1;
+            int bottom = param(1, rows_) - 1;
             set_scroll_region(top, bottom);
             break;
         }

@@ -200,6 +200,30 @@ esp_err_t SshClient::open_shell(uint16_t cols, uint16_t rows)
     return ESP_OK;
 }
 
+esp_err_t SshClient::resize_shell(uint16_t cols, uint16_t rows)
+{
+    if (shell_channel_ == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (cols == shell_cols_ && rows == shell_rows_) {
+        return ESP_OK;
+    }
+
+    int rc = libssh2_channel_request_pty_size(shell_channel_, cols, rows);
+    if (rc == LIBSSH2_ERROR_EAGAIN) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        rc = libssh2_channel_request_pty_size(shell_channel_, cols, rows);
+    }
+    if (rc != 0) {
+        last_error_ = libssh2_error(session_, "ssh pty resize failed");
+        ESP_LOGW(TAG, "%s", last_error_.c_str());
+        return ESP_FAIL;
+    }
+    shell_cols_ = cols;
+    shell_rows_ = rows;
+    return ESP_OK;
+}
+
 esp_err_t SshClient::send_shell_line(const std::string& line, std::string& output)
 {
     output.clear();
