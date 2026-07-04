@@ -1,0 +1,26 @@
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "app/app_controller.cpp"
+        "drivers/display.cpp"
+        "drivers/keyboard.cpp"
+        "drivers/tca8418.cpp"
+        "net/wifi_manager.cpp"
+        "ssh/ssh_client.cpp"
+        "storage/settings_store.cpp"
+        "terminal/terminal_emulator.cpp"
+        "ui/ui_app.cpp"
+        "ui/text_input.cpp"
+        "util/string_utils.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        esp_wifi
+        esp_event
+        nvs_flash
+        esp_netif
+        lwip
+        driver
+        M5Unified
+        libssh2_esp
+)
