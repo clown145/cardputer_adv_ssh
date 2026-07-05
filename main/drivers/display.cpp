@@ -452,11 +452,24 @@ void draw_status_icon(int cx, int y, uint32_t color)
     M5.Display.fillRect(cx - 1, y + 16, 3, 14, color);
 }
 
+void draw_web_icon(int cx, int y, uint32_t color)
+{
+    M5.Display.drawCircle(cx, y + 20, 20, color);
+    M5.Display.drawFastHLine(cx - 17, y + 20, 34, color);
+    M5.Display.drawFastHLine(cx - 13, y + 11, 26, color);
+    M5.Display.drawFastHLine(cx - 13, y + 29, 26, color);
+    M5.Display.drawArc(cx, y + 20, 10, 20, 80, 280, color);
+    M5.Display.drawArc(cx, y + 20, 10, 20, 260, 100, color);
+}
+
 void draw_launcher_icon(LauncherIcon icon, int cx, int y, uint32_t color)
 {
     switch (icon) {
         case LauncherIcon::kWifi:
             draw_wifi_icon(cx, y, color);
+            break;
+        case LauncherIcon::kWeb:
+            draw_web_icon(cx, y, color);
             break;
         case LauncherIcon::kSsh:
             draw_ssh_icon(cx, y, color);

@@ -1,6 +1,7 @@
 #include "net/wifi_manager.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "esp_check.h"
@@ -171,6 +172,20 @@ bool WifiManager::has_ipv6() const
 bool WifiManager::has_global_ipv6() const
 {
     return global_ipv6_ready_;
+}
+
+std::string WifiManager::ipv4_address() const
+{
+    if (sta_netif_ == nullptr || !connected_) {
+        return "";
+    }
+    esp_netif_ip_info_t info = {};
+    if (esp_netif_get_ip_info(sta_netif_, &info) != ESP_OK || info.ip.addr == 0) {
+        return "";
+    }
+    char buffer[16] = {};
+    std::snprintf(buffer, sizeof(buffer), IPSTR, IP2STR(&info.ip));
+    return buffer;
 }
 
 std::string WifiManager::ipv6_status() const

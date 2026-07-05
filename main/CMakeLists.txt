@@ -12,6 +12,7 @@ idf_component_register(
         "ui/ui_app.cpp"
         "ui/text_input.cpp"
         "util/string_utils.cpp"
+        "web/web_server.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -19,9 +20,12 @@ idf_component_register(
         esp_event
         nvs_flash
         esp_netif
+        esp_http_server
+        json
         lwip
         driver
         M5Unified
+        mbedtls
         libssh2_esp
         libvterm
 )

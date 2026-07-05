@@ -47,6 +47,11 @@ SshClient::~SshClient()
 
 esp_err_t SshClient::connect_password(const SshProfile& profile)
 {
+    return connect(profile, "");
+}
+
+esp_err_t SshClient::connect(const SshProfile& profile, const std::string& private_key_pem)
+{
     disconnect();
     last_error_.clear();
     state_ = SshState::kResolving;
@@ -98,6 +103,30 @@ esp_err_t SshClient::connect_password(const SshProfile& profile)
     }
 
     state_ = SshState::kAuthenticating;
+    if (!private_key_pem.empty()) {
+        rc = libssh2_userauth_publickey_frommemory(session_, profile.username.c_str(), profile.username.size(),
+                                                   nullptr, 0, private_key_pem.c_str(), private_key_pem.size(),
+                                                   nullptr);
+        if (rc == 0) {
+            state_ = SshState::kConnected;
+            ESP_LOGI(TAG, "connected to %s:%u as %s using key", profile.host.c_str(), profile.port,
+                     profile.username.c_str());
+            return ESP_OK;
+        }
+        if (profile.password.empty()) {
+            set_error(libssh2_error(session_, "ssh key auth failed"));
+            disconnect();
+            return ESP_FAIL;
+        }
+        ESP_LOGW(TAG, "ssh key auth failed, trying password: %s",
+                 libssh2_error(session_, "ssh key auth failed").c_str());
+    }
+
+    if (profile.password.empty()) {
+        set_error("ssh password is empty");
+        disconnect();
+        return ESP_FAIL;
+    }
     rc = libssh2_userauth_password(session_, profile.username.c_str(), profile.password.c_str());
     if (rc != 0) {
         set_error(libssh2_error(session_, "ssh password auth failed"));

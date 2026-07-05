@@ -6,6 +6,7 @@
 #include "ssh/ssh_client.h"
 #include "storage/settings_store.h"
 #include "ui/ui_app.h"
+#include "web/web_server.h"
 
 namespace adv {
 
@@ -20,6 +21,7 @@ private:
     Keyboard keyboard_;
     WifiManager wifi_;
     SshClient ssh_;
+    WebServer web_;
     UiApp ui_;
 };
 

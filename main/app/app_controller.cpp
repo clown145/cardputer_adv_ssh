@@ -8,7 +8,7 @@ namespace {
 constexpr const char* TAG = "app";
 }
 
-AppController::AppController() : wifi_(store_), ui_(display_, keyboard_, store_, wifi_, ssh_) {}
+AppController::AppController() : wifi_(store_), web_(store_), ui_(display_, keyboard_, store_, wifi_, ssh_, web_) {}
 
 void AppController::run()
 {

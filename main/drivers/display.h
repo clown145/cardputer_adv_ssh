@@ -22,6 +22,7 @@ enum class TerminalChromeMode {
 enum class LauncherIcon {
     kTerminal,
     kWifi,
+    kWeb,
     kSsh,
     kStatus,
 };

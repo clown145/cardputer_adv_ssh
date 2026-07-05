@@ -9,12 +9,14 @@
 #include "ssh/ssh_client.h"
 #include "storage/settings_store.h"
 #include "ui/text_input.h"
+#include "web/web_server.h"
 
 namespace adv {
 
 class UiApp {
 public:
-    UiApp(Display& display, Keyboard& keyboard, SettingsStore& store, WifiManager& wifi, SshClient& ssh);
+    UiApp(Display& display, Keyboard& keyboard, SettingsStore& store, WifiManager& wifi, SshClient& ssh,
+          WebServer& web);
     void run();
 
 private:
@@ -24,6 +26,7 @@ private:
     int menu(const std::string& title, const std::vector<std::string>& items, const std::string& footer);
     void pause(const std::string& title, const std::vector<std::string>& lines);
     void wifi_screen();
+    void webui_screen();
     void ssh_screen();
     void status_screen();
     void terminal_screen();
@@ -42,6 +45,7 @@ private:
     SettingsStore& store_;
     WifiManager& wifi_;
     SshClient& ssh_;
+    WebServer& web_;
     TextInput input_;
     SshProfile active_profile_;
     SshProfile selected_profile_;

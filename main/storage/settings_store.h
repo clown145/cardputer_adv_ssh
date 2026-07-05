@@ -39,6 +39,10 @@ public:
     std::string load_terminal_chrome_mode();
     esp_err_t save_terminal_chrome_mode(const std::string& mode);
 
+    std::string load_ssh_private_key();
+    std::string load_ssh_public_key();
+    esp_err_t save_ssh_key_pair(const std::string& private_key, const std::string& public_key);
+
 private:
     static constexpr int kMaxWifiProfiles = 8;
     static constexpr int kMaxSshProfiles = 8;

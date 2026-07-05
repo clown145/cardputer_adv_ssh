@@ -43,6 +43,7 @@ public:
     bool is_connected() const;
     bool has_ipv6() const;
     bool has_global_ipv6() const;
+    std::string ipv4_address() const;
     std::string ipv6_status() const;
 
 private:

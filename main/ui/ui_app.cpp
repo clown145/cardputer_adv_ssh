@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstdint>
 
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "terminal/terminal_emulator.h"
@@ -194,8 +195,10 @@ std::string chrome_mode_text(TerminalChromeMode mode)
 }
 }  // namespace
 
-UiApp::UiApp(Display& display, Keyboard& keyboard, SettingsStore& store, WifiManager& wifi, SshClient& ssh)
-    : display_(display), keyboard_(keyboard), store_(store), wifi_(wifi), ssh_(ssh), input_(display, keyboard)
+UiApp::UiApp(Display& display, Keyboard& keyboard, SettingsStore& store, WifiManager& wifi, SshClient& ssh,
+             WebServer& web)
+    : display_(display), keyboard_(keyboard), store_(store), wifi_(wifi), ssh_(ssh), web_(web),
+      input_(display, keyboard)
 {
 }
 
@@ -231,6 +234,7 @@ void UiApp::run()
         std::vector<LauncherItem> items = {
             {LauncherIcon::kTerminal, "Terminal", ssh_subtitle},
             {LauncherIcon::kWifi, "Wi-Fi", wifi_.is_connected() ? wifi_.connected_ssid() : "Network setup"},
+            {LauncherIcon::kWeb, "WebUI", "Local configuration"},
             {LauncherIcon::kSsh, "SSH Profiles", "Choose or edit servers"},
             {LauncherIcon::kStatus, "Status", terminal_chrome_label()},
         };
@@ -240,8 +244,10 @@ void UiApp::run()
         } else if (selected == 1) {
             wifi_screen();
         } else if (selected == 2) {
-            ssh_screen();
+            webui_screen();
         } else if (selected == 3) {
+            ssh_screen();
+        } else if (selected == 4) {
             status_screen();
         }
     }
@@ -383,6 +389,42 @@ void UiApp::wifi_screen()
     } else {
         pause("Wi-Fi", {"Failed", wifi_.last_error()});
     }
+}
+
+void UiApp::webui_screen()
+{
+    if (!wifi_.is_connected()) {
+        pause("WebUI", {"Wi-Fi is not connected", "Open Wi-Fi first"});
+        return;
+    }
+
+    esp_err_t err = web_.start();
+    if (err != ESP_OK) {
+        pause("WebUI", {"Start failed", esp_err_to_name(err)});
+        return;
+    }
+
+    while (true) {
+        refresh_status_flags();
+        std::string ip = wifi_.ipv4_address();
+        display_.show_status("WebUI", {"Running",
+                                        ip.empty() ? "IP address unavailable" : "http://" + ip + "/",
+                                        "Password: " + web_.password(),
+                                        "Enter/Esc stop"});
+
+        auto event = keyboard_.poll();
+        if (event.has_value() && (event->kind == KeyKind::kEnter || event->kind == KeyKind::kEscape)) {
+            break;
+        }
+        if (!wifi_.is_connected()) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+
+    web_.stop();
+    terminal_chrome_mode_ = parse_chrome_mode(store_.load_terminal_chrome_mode());
+    display_.set_terminal_chrome_mode(terminal_chrome_mode_);
 }
 
 void UiApp::ssh_screen()
@@ -543,7 +585,7 @@ bool UiApp::connect_ssh_profile(const SshProfile& profile)
 
     refresh_status_flags();
     display_.show_status("SSH", {"Connecting", profile_label(profile)});
-    if (ssh_.connect_password(profile) != ESP_OK) {
+    if (ssh_.connect(profile, store_.load_ssh_private_key()) != ESP_OK) {
         refresh_status_flags();
         return false;
     }

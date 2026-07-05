@@ -29,6 +29,7 @@ public:
     SshClient();
     ~SshClient();
 
+    esp_err_t connect(const SshProfile& profile, const std::string& private_key_pem);
     esp_err_t connect_password(const SshProfile& profile);
     esp_err_t exec(const std::string& command, SshExecResult& result);
     esp_err_t open_shell(uint16_t cols = 80, uint16_t rows = 24);
