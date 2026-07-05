@@ -22,6 +22,7 @@ constexpr const char* KEY_SSH_INDEX = "ssh_index";
 constexpr const char* KEY_DEFAULT_SSH = "default_ssh";
 constexpr const char* KEY_TERMINAL_CHROME = "term_chrome";
 constexpr const char* KEY_TERMINAL_THEME = "term_theme";
+constexpr const char* KEY_TERMINAL_FONT = "term_font";
 constexpr const char* KEY_SSH_PRIVATE_KEY = "ssh_private";
 constexpr const char* KEY_SSH_PUBLIC_KEY = "ssh_public";
 
@@ -189,6 +190,16 @@ std::string SettingsStore::load_terminal_theme()
 esp_err_t SettingsStore::save_terminal_theme(const std::string& theme)
 {
     return set_string(NS_APP, KEY_TERMINAL_THEME, theme);
+}
+
+std::string SettingsStore::load_terminal_font()
+{
+    return get_string(NS_APP, KEY_TERMINAL_FONT);
+}
+
+esp_err_t SettingsStore::save_terminal_font(const std::string& font)
+{
+    return set_string(NS_APP, KEY_TERMINAL_FONT, font);
 }
 
 std::string SettingsStore::load_ssh_private_key()

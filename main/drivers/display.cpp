@@ -24,6 +24,7 @@ bool g_wifi_connected = false;
 bool g_ssh_connected = false;
 TerminalChromeMode g_terminal_chrome_mode = TerminalChromeMode::kFull;
 TerminalTheme g_terminal_theme = TerminalTheme::kAdvDark;
+TerminalFontFace g_terminal_font_face = TerminalFontFace::kCjk12;
 
 uint32_t ansi_color(uint8_t color, bool bold);
 
@@ -89,6 +90,21 @@ const TerminalPalette& terminal_palette()
         index = 0;
     }
     return kTerminalThemes[index];
+}
+
+const uint8_t* terminal_efont()
+{
+    switch (g_terminal_font_face) {
+        case TerminalFontFace::kCjk12Bold:
+            return lgfx_efont_cn_12_b;
+        case TerminalFontFace::kCjk10:
+            return lgfx_efont_cn_10;
+        case TerminalFontFace::kCjk14:
+            return lgfx_efont_cn_14;
+        case TerminalFontFace::kCjk12:
+        default:
+            return lgfx_efont_cn_12;
+    }
 }
 
 uint32_t terminal_background()
@@ -224,20 +240,23 @@ uint16_t font_u16(const uint8_t* ptr)
 
 int8_t font_i8(size_t index)
 {
-    return static_cast<int8_t>(font_byte(&lgfx_efont_cn_12[index]));
+    const uint8_t* font = terminal_efont();
+    return static_cast<int8_t>(font_byte(&font[index]));
 }
 
 uint8_t font_header(size_t index)
 {
-    return font_byte(&lgfx_efont_cn_12[index]);
+    const uint8_t* font = terminal_efont();
+    return font_byte(&font[index]);
 }
 
 const uint8_t* find_efont_cn_glyph(uint16_t encoding)
 {
-    const uint8_t* font = &lgfx_efont_cn_12[23];
-    uint16_t start_upper = font_u16(&lgfx_efont_cn_12[17]);
-    uint16_t start_lower = font_u16(&lgfx_efont_cn_12[19]);
-    uint16_t start_unicode = font_u16(&lgfx_efont_cn_12[21]);
+    const uint8_t* base = terminal_efont();
+    const uint8_t* font = &base[23];
+    uint16_t start_upper = font_u16(&base[17]);
+    uint16_t start_lower = font_u16(&base[19]);
+    uint16_t start_unicode = font_u16(&base[21]);
 
     if (encoding <= 255) {
         if (encoding >= 'a') {
@@ -550,6 +569,11 @@ void Display::set_terminal_theme(TerminalTheme theme)
     g_terminal_theme = theme;
 }
 
+void Display::set_terminal_font_face(TerminalFontFace face)
+{
+    g_terminal_font_face = face;
+}
+
 TerminalLayout Display::terminal_layout(TerminalFontMode mode) const
 {
     TerminalLayout layout;
@@ -580,6 +604,16 @@ TerminalLayout Display::terminal_layout(TerminalFontMode mode) const
             layout.cjk_scale = 1;
             layout.ascii_8x16 = false;
             break;
+    }
+
+    if (g_terminal_font_face == TerminalFontFace::kCjk14) {
+        if (mode == TerminalFontMode::kCompact) {
+            layout.cell_width = 7;
+            layout.cell_height = 14;
+        } else if (mode == TerminalFontMode::kLarge) {
+            layout.cell_width = 14;
+            layout.cell_height = 28;
+        }
     }
 
     int width = std::max(1, static_cast<int>(M5.Display.width()));

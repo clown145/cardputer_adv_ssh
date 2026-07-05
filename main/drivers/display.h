@@ -32,6 +32,13 @@ enum class TerminalTheme {
     kCount,
 };
 
+enum class TerminalFontFace {
+    kCjk12,
+    kCjk12Bold,
+    kCjk10,
+    kCjk14,
+};
+
 enum class LauncherIcon {
     kTerminal,
     kWifi,
@@ -65,6 +72,7 @@ public:
     void set_status_flags(bool wifi_connected, bool ssh_connected);
     void set_terminal_chrome_mode(TerminalChromeMode mode);
     void set_terminal_theme(TerminalTheme theme);
+    void set_terminal_font_face(TerminalFontFace face);
     TerminalLayout terminal_layout(TerminalFontMode mode) const;
     void show_status(const std::string& title, const std::vector<std::string>& lines);
     void show_menu(const std::string& title, const std::vector<std::string>& items, int selected,

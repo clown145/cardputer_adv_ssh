@@ -1,0 +1,114 @@
+name: Firmware
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional release tag to publish, for example v1.0.0"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  PROJECT_NAME: cardputer_adv_ssh
+  IDF_TARGET: esp32s3
+
+jobs:
+  build:
+    name: Build ESP32-S3 firmware
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.4
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+            publish_release="true"
+          elif [[ -n "${{ github.event.inputs.release_tag || '' }}" ]]; then
+            version="${{ github.event.inputs.release_tag }}"
+            publish_release="true"
+          else
+            version="$(git rev-parse --short=12 HEAD)"
+            publish_release="false"
+          fi
+          safe_version="${version//\//-}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "safe_version=${safe_version}" >> "${GITHUB_OUTPUT}"
+          echo "publish_release=${publish_release}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /opt/esp/idf/export.sh
+          idf.py set-target "${IDF_TARGET}"
+          idf.py build
+
+      - name: Package firmware and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /opt/esp/idf/export.sh
+          version="${{ steps.version.outputs.safe_version }}"
+          dist="dist/${PROJECT_NAME}-${version}"
+          mkdir -p "${dist}"
+
+          cp "build/${PROJECT_NAME}.bin" "${dist}/${PROJECT_NAME}.bin"
+          cp "build/bootloader/bootloader.bin" "${dist}/bootloader.bin"
+          cp "build/partition_table/partition-table.bin" "${dist}/partition-table.bin"
+          cp "build/flash_args" "${dist}/flash_args.txt"
+
+          git archive \
+            --format=tar.gz \
+            --prefix="${PROJECT_NAME}-${version}/" \
+            -o "${dist}/${PROJECT_NAME}-${version}-source.tar.gz" \
+            HEAD
+
+          {
+            echo "Project: ${PROJECT_NAME}"
+            echo "Version: ${{ steps.version.outputs.version }}"
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Target: ${IDF_TARGET}"
+            echo
+            echo "Main firmware image: ${PROJECT_NAME}.bin"
+            echo "This release is built for M5Stack Cardputer-Adv / cardputer_adv."
+          } > "${dist}/README.txt"
+
+          (cd "${dist}" && sha256sum * > "SHA256SUMS.txt")
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROJECT_NAME }}-${{ steps.version.outputs.safe_version }}
+          path: dist/${{ env.PROJECT_NAME }}-${{ steps.version.outputs.safe_version }}/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: steps.version.outputs.publish_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/${{ env.PROJECT_NAME }}-${{ steps.version.outputs.safe_version }}/*

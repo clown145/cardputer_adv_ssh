@@ -21,6 +21,12 @@ struct ThemeOption {
     const char* label;
 };
 
+struct FontOption {
+    TerminalFontFace face;
+    const char* storage;
+    const char* label;
+};
+
 static constexpr ThemeOption kThemeOptions[] = {
     {TerminalTheme::kAdvDark, "adv_dark", "Adv Dark"},
     {TerminalTheme::kTrueBlack, "true_black", "True Black"},
@@ -33,6 +39,14 @@ static constexpr ThemeOption kThemeOptions[] = {
     {TerminalTheme::kMonokai, "monokai", "Monokai"},
 };
 constexpr int kThemeOptionCount = sizeof(kThemeOptions) / sizeof(kThemeOptions[0]);
+
+static constexpr FontOption kFontOptions[] = {
+    {TerminalFontFace::kCjk12, "cjk_12", "CJK 12"},
+    {TerminalFontFace::kCjk12Bold, "cjk_12_bold", "CJK 12 Bold"},
+    {TerminalFontFace::kCjk10, "cjk_10", "CJK 10 Small"},
+    {TerminalFontFace::kCjk14, "cjk_14", "CJK 14 Large"},
+};
+constexpr int kFontOptionCount = sizeof(kFontOptions) / sizeof(kFontOptions[0]);
 
 std::string wifi_state_text(const WifiManager& wifi)
 {
@@ -242,6 +256,36 @@ std::string theme_text(TerminalTheme theme)
     }
     return std::string("Theme: ") + kThemeOptions[0].label;
 }
+
+TerminalFontFace parse_terminal_font_face(const std::string& raw)
+{
+    for (const auto& option : kFontOptions) {
+        if (raw == option.storage) {
+            return option.face;
+        }
+    }
+    return TerminalFontFace::kCjk12;
+}
+
+std::string font_storage_value(TerminalFontFace face)
+{
+    for (const auto& option : kFontOptions) {
+        if (option.face == face) {
+            return option.storage;
+        }
+    }
+    return kFontOptions[0].storage;
+}
+
+std::string font_text(TerminalFontFace face)
+{
+    for (const auto& option : kFontOptions) {
+        if (option.face == face) {
+            return std::string("Font: ") + option.label;
+        }
+    }
+    return std::string("Font: ") + kFontOptions[0].label;
+}
 }  // namespace
 
 UiApp::UiApp(Display& display, Keyboard& keyboard, SettingsStore& store, WifiManager& wifi, SshClient& ssh,
@@ -260,6 +304,8 @@ void UiApp::load_settings()
     display_.set_terminal_chrome_mode(terminal_chrome_mode_);
     terminal_theme_ = parse_terminal_theme(store_.load_terminal_theme());
     display_.set_terminal_theme(terminal_theme_);
+    terminal_font_face_ = parse_terminal_font_face(store_.load_terminal_font());
+    display_.set_terminal_font_face(terminal_font_face_);
     settings_loaded_ = true;
 }
 
@@ -268,6 +314,7 @@ void UiApp::refresh_status_flags()
     display_.set_status_flags(wifi_.is_connected(), ssh_.connected());
     display_.set_terminal_chrome_mode(terminal_chrome_mode_);
     display_.set_terminal_theme(terminal_theme_);
+    display_.set_terminal_font_face(terminal_font_face_);
 }
 
 void UiApp::run()
@@ -491,8 +538,10 @@ void UiApp::webui_screen()
     web_.stop();
     terminal_chrome_mode_ = parse_chrome_mode(store_.load_terminal_chrome_mode());
     terminal_theme_ = parse_terminal_theme(store_.load_terminal_theme());
+    terminal_font_face_ = parse_terminal_font_face(store_.load_terminal_font());
     display_.set_terminal_chrome_mode(terminal_chrome_mode_);
     display_.set_terminal_theme(terminal_theme_);
+    display_.set_terminal_font_face(terminal_font_face_);
 }
 
 void UiApp::ssh_screen()
@@ -563,10 +612,11 @@ void UiApp::status_screen()
     std::vector<std::string> items = {
         "Terminal chrome",
         "Terminal theme",
+        "Terminal font",
         "Connection status",
         "Back",
     };
-    int selected = menu("Status", items, terminal_theme_label());
+    int selected = menu("Status", items, terminal_font_label());
     if (selected == 0) {
         std::vector<std::string> modes = {"Full", "Compact", "Hidden", "Back"};
         int chosen = menu("Terminal Chrome", modes, terminal_chrome_label());
@@ -588,12 +638,22 @@ void UiApp::status_screen()
             set_terminal_theme(kThemeOptions[chosen].theme);
         }
     } else if (selected == 2) {
+        std::vector<std::string> fonts;
+        for (const auto& option : kFontOptions) {
+            fonts.push_back(option.label);
+        }
+        fonts.push_back("Back");
+        int chosen = menu("Terminal Font", fonts, terminal_font_label());
+        if (chosen >= 0 && chosen < kFontOptionCount) {
+            set_terminal_font_face(kFontOptions[chosen].face);
+        }
+    } else if (selected == 3) {
         pause("Status", {wifi_state_text(wifi_), "IPv6: " + wifi_.ipv6_status(),
                          ssh_.connected() ? "SSH: connected" : "SSH: disconnected",
                          active_profile_.name.empty() ? "" : "SSH host: " + profile_label(active_profile_),
                          has_selected_profile_ ? "Selected: " + profile_label(selected_profile_) : "",
                          ssh_.last_error().empty() ? "" : "SSH err: " + ssh_.last_error(),
-                         terminal_chrome_label(), terminal_theme_label()});
+                         terminal_chrome_label(), terminal_theme_label(), terminal_font_label()});
     }
 }
 
@@ -991,6 +1051,13 @@ void UiApp::set_terminal_theme(TerminalTheme theme)
     store_.save_terminal_theme(theme_storage_value(theme));
 }
 
+void UiApp::set_terminal_font_face(TerminalFontFace face)
+{
+    terminal_font_face_ = face;
+    display_.set_terminal_font_face(face);
+    store_.save_terminal_font(font_storage_value(face));
+}
+
 std::string UiApp::terminal_chrome_label() const
 {
     return chrome_mode_text(terminal_chrome_mode_);
@@ -999,6 +1066,11 @@ std::string UiApp::terminal_chrome_label() const
 std::string UiApp::terminal_theme_label() const
 {
     return theme_text(terminal_theme_);
+}
+
+std::string UiApp::terminal_font_label() const
+{
+    return font_text(terminal_font_face_);
 }
 
 std::string UiApp::profile_label(const SshProfile& profile) const
