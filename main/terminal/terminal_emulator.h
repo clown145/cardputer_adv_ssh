@@ -76,11 +76,42 @@ private:
         int col = 0;
     };
 
+    struct PackedTerminalCell {
+        uint32_t codepoint = ' ';
+        uint8_t fg = 7;
+        uint8_t bg = 0;
+        uint8_t width = 1;
+        uint8_t flags = 0;
+    };
+
+    struct ScrollbackLine {
+        PackedTerminalCell* cells = nullptr;
+        uint8_t cols = 0;
+
+        ScrollbackLine() = default;
+        ~ScrollbackLine();
+        ScrollbackLine(const ScrollbackLine&) = delete;
+        ScrollbackLine& operator=(const ScrollbackLine&) = delete;
+        ScrollbackLine(ScrollbackLine&& other) noexcept;
+        ScrollbackLine& operator=(ScrollbackLine&& other) noexcept;
+
+        bool assign(size_t cell_count);
+        void clear();
+    };
+
     std::vector<TerminalCell> blank_line() const;
     void init_vterm();
     void release_vterm();
     void append_scrollback_line(int cols, const VTermScreenCell* cells);
+    PackedTerminalCell pack_cell(const VTermScreenCell& cell) const;
+    TerminalCell unpack_cell(const PackedTerminalCell& cell) const;
+    bool is_default_blank(const PackedTerminalCell& cell) const;
     TerminalCell convert_cell(const VTermScreenCell& cell) const;
+    const ScrollbackLine* scrollback_line(size_t logical_index) const;
+    bool ensure_scrollback_slot();
+    void drop_oldest_scrollback_line();
+    void clear_scrollback();
+    void copy_scrollback_line(size_t logical_index, std::vector<TerminalCell>& out) const;
     void mark_dirty(int row);
     void mark_dirty_rect(VTermRect rect);
     void update_cursor(VTermPos pos, bool visible);
@@ -103,7 +134,9 @@ private:
     int rows_ = kRows;
     size_t max_scrollback_lines_ = 400;
     std::vector<bool> dirty_;
-    std::vector<std::vector<TerminalCell>> scrollback_;
+    std::vector<ScrollbackLine> scrollback_;
+    size_t scrollback_start_ = 0;
+    size_t scrollback_count_ = 0;
     CursorState cursor_;
     bool cursor_visible_ = true;
     bool alt_active_ = false;

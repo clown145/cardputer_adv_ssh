@@ -1,11 +1,25 @@
 #include "terminal/terminal_emulator.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#endif
 
 namespace adv {
 namespace {
 constexpr TerminalCell kBlank{};
+constexpr uint8_t kCellBold = 1 << 0;
+constexpr uint8_t kCellInverse = 1 << 1;
+constexpr uint8_t kCellUnderline = 1 << 2;
+constexpr uint8_t kCellDim = 1 << 3;
+constexpr uint8_t kCellHidden = 1 << 4;
+constexpr uint8_t kCellStrikethrough = 1 << 5;
+constexpr uint8_t kCellContinuation = 1 << 6;
+constexpr size_t kScrollbackMinFreeHeap = 48 * 1024;
+constexpr size_t kScrollbackMinLargestBlock = 4 * 1024;
 
 int clamp_int(int value, int low, int high)
 {
@@ -96,7 +110,97 @@ VTermKey to_vterm_key(TerminalInputKey key)
     }
     return VTERM_KEY_NONE;
 }
+
+void* allocate_scrollback_bytes(size_t bytes)
+{
+    if (bytes == 0) {
+        return nullptr;
+    }
+#ifdef ESP_PLATFORM
+    return heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
+#else
+    return std::malloc(bytes);
+#endif
+}
+
+void free_scrollback_bytes(void* ptr)
+{
+    if (ptr == nullptr) {
+        return;
+    }
+#ifdef ESP_PLATFORM
+    heap_caps_free(ptr);
+#else
+    std::free(ptr);
+#endif
+}
+
+bool has_scrollback_heap_budget(size_t bytes)
+{
+    if (bytes == 0) {
+        return true;
+    }
+#ifdef ESP_PLATFORM
+    size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    size_t required_largest = std::max(bytes, kScrollbackMinLargestBlock);
+    return free_heap > kScrollbackMinFreeHeap + bytes && largest_block >= required_largest;
+#else
+    (void)bytes;
+    return true;
+#endif
+}
 }  // namespace
+
+TerminalEmulator::ScrollbackLine::~ScrollbackLine()
+{
+    clear();
+}
+
+TerminalEmulator::ScrollbackLine::ScrollbackLine(ScrollbackLine&& other) noexcept
+    : cells(other.cells), cols(other.cols)
+{
+    other.cells = nullptr;
+    other.cols = 0;
+}
+
+TerminalEmulator::ScrollbackLine& TerminalEmulator::ScrollbackLine::operator=(ScrollbackLine&& other) noexcept
+{
+    if (this != &other) {
+        clear();
+        cells = other.cells;
+        cols = other.cols;
+        other.cells = nullptr;
+        other.cols = 0;
+    }
+    return *this;
+}
+
+bool TerminalEmulator::ScrollbackLine::assign(size_t cell_count)
+{
+    clear();
+    if (cell_count == 0) {
+        return true;
+    }
+    if (cell_count > 255) {
+        cell_count = 255;
+    }
+    auto* next = static_cast<PackedTerminalCell*>(
+        allocate_scrollback_bytes(cell_count * sizeof(PackedTerminalCell)));
+    if (next == nullptr) {
+        return false;
+    }
+    cells = next;
+    cols = static_cast<uint8_t>(cell_count);
+    return true;
+}
+
+void TerminalEmulator::ScrollbackLine::clear()
+{
+    free_scrollback_bytes(cells);
+    cells = nullptr;
+    cols = 0;
+}
 
 TerminalEmulator::TerminalEmulator(int cols, int rows, size_t scrollback_lines)
     : cols_(clamp_int(cols, 8, 80)),
@@ -114,7 +218,7 @@ TerminalEmulator::~TerminalEmulator()
 
 void TerminalEmulator::reset()
 {
-    scrollback_.clear();
+    clear_scrollback();
     pending_output_.clear();
     alt_active_ = false;
     cursor_visible_ = true;
@@ -137,9 +241,6 @@ void TerminalEmulator::resize(int cols, int rows)
     cols_ = cols;
     rows_ = rows;
     dirty_.assign(rows_, true);
-    for (auto& line : scrollback_) {
-        line.resize(cols_, kBlank);
-    }
     if (vt_ != nullptr) {
         vterm_set_size(vt_, rows_, cols_);
     }
@@ -227,19 +328,17 @@ std::vector<TerminalCell> TerminalEmulator::line(int row) const
 std::vector<std::vector<TerminalCell>> TerminalEmulator::scrollback_snapshot(int offset) const
 {
     offset = clamp_int(offset, 0, max_scrollback_offset());
-    std::vector<std::vector<TerminalCell>> combined;
-    combined.reserve(scrollback_.size() + rows_);
-    combined.insert(combined.end(), scrollback_.begin(), scrollback_.end());
-    for (int row = 0; row < rows_; ++row) {
-        combined.push_back(line(row));
-    }
-
     std::vector<std::vector<TerminalCell>> view(rows_, blank_line());
-    int total = static_cast<int>(combined.size());
+    int scrollback_rows = static_cast<int>(scrollback_count_);
+    int total = scrollback_rows + rows_;
     int start = std::max(0, total - rows_ - offset);
     for (int row = 0; row < rows_ && start + row < total; ++row) {
-        view[row] = combined[start + row];
-        view[row].resize(cols_, kBlank);
+        int source = start + row;
+        if (source < scrollback_rows) {
+            copy_scrollback_line(static_cast<size_t>(source), view[row]);
+        } else {
+            view[row] = line(source - scrollback_rows);
+        }
     }
     return view;
 }
@@ -287,12 +386,12 @@ bool TerminalEmulator::application_cursor_mode() const
 
 int TerminalEmulator::scrollback_size() const
 {
-    return static_cast<int>(scrollback_.size());
+    return static_cast<int>(scrollback_count_);
 }
 
 int TerminalEmulator::max_scrollback_offset() const
 {
-    return static_cast<int>(scrollback_.size());
+    return static_cast<int>(scrollback_count_);
 }
 
 std::vector<TerminalCell> TerminalEmulator::blank_line() const
@@ -356,38 +455,156 @@ void TerminalEmulator::append_scrollback_line(int cols, const VTermScreenCell* c
     if (max_scrollback_lines_ == 0 || cells == nullptr || alt_active_) {
         return;
     }
-    std::vector<TerminalCell> line(cols_, kBlank);
     int limit = std::min(cols, cols_);
+    while (limit > 0 && is_default_blank(pack_cell(cells[limit - 1]))) {
+        --limit;
+    }
+
+    size_t bytes = static_cast<size_t>(limit) * sizeof(PackedTerminalCell);
+    while (scrollback_count_ >= max_scrollback_lines_) {
+        drop_oldest_scrollback_line();
+    }
+    while (scrollback_count_ > 0 && !has_scrollback_heap_budget(bytes)) {
+        drop_oldest_scrollback_line();
+    }
+    if (!has_scrollback_heap_budget(bytes) || !ensure_scrollback_slot()) {
+        return;
+    }
+
+    size_t slot = (scrollback_start_ + scrollback_count_) % scrollback_.size();
+    if (!scrollback_[slot].assign(static_cast<size_t>(limit))) {
+        return;
+    }
     for (int col = 0; col < limit; ++col) {
-        line[col] = convert_cell(cells[col]);
+        scrollback_[slot].cells[col] = pack_cell(cells[col]);
     }
-    scrollback_.push_back(line);
-    if (scrollback_.size() > max_scrollback_lines_) {
-        scrollback_.erase(scrollback_.begin(), scrollback_.begin() + (scrollback_.size() - max_scrollback_lines_));
+    ++scrollback_count_;
+}
+
+TerminalEmulator::PackedTerminalCell TerminalEmulator::pack_cell(const VTermScreenCell& source) const
+{
+    PackedTerminalCell cell{};
+    if (source.chars[0] == static_cast<uint32_t>(-1)) {
+        cell.width = 0;
+        cell.flags = kCellContinuation;
+        return cell;
     }
+
+    cell.codepoint = source.chars[0] == 0 ? ' ' : source.chars[0];
+    cell.width = std::max<char>(1, source.width);
+    cell.fg = vterm_color_to_ansi(source.fg, true);
+    cell.bg = vterm_color_to_ansi(source.bg, false);
+    if (source.attrs.bold) {
+        cell.flags |= kCellBold;
+    }
+    if (source.attrs.reverse) {
+        cell.flags |= kCellInverse;
+    }
+    if (source.attrs.underline != VTERM_UNDERLINE_OFF) {
+        cell.flags |= kCellUnderline;
+    }
+    if (source.attrs.conceal) {
+        cell.flags |= kCellHidden;
+    }
+    if (source.attrs.strike) {
+        cell.flags |= kCellStrikethrough;
+    }
+    return cell;
+}
+
+TerminalCell TerminalEmulator::unpack_cell(const PackedTerminalCell& source) const
+{
+    TerminalCell cell{};
+    cell.codepoint = source.codepoint == 0 ? ' ' : source.codepoint;
+    cell.ch = cell.codepoint < 128 ? static_cast<char>(cell.codepoint) : '?';
+    cell.fg = source.fg;
+    cell.bg = source.bg;
+    cell.width = source.width;
+    cell.bold = (source.flags & kCellBold) != 0;
+    cell.inverse = (source.flags & kCellInverse) != 0;
+    cell.underline = (source.flags & kCellUnderline) != 0;
+    cell.dim = (source.flags & kCellDim) != 0;
+    cell.hidden = (source.flags & kCellHidden) != 0;
+    cell.strikethrough = (source.flags & kCellStrikethrough) != 0;
+    cell.continuation = (source.flags & kCellContinuation) != 0;
+    return cell;
+}
+
+bool TerminalEmulator::is_default_blank(const PackedTerminalCell& cell) const
+{
+    return cell.codepoint == ' ' && cell.fg == kBlank.fg && cell.bg == kBlank.bg && cell.width == kBlank.width &&
+           cell.flags == 0;
 }
 
 TerminalCell TerminalEmulator::convert_cell(const VTermScreenCell& source) const
 {
-    TerminalCell cell{};
-    if (source.chars[0] == static_cast<uint32_t>(-1)) {
-        cell.width = 0;
-        cell.continuation = true;
-        return cell;
-    }
+    return unpack_cell(pack_cell(source));
+}
 
-    uint32_t codepoint = source.chars[0] == 0 ? ' ' : source.chars[0];
-    cell.codepoint = codepoint;
-    cell.ch = codepoint < 128 ? static_cast<char>(codepoint) : '?';
-    cell.width = std::max<char>(1, source.width);
-    cell.bold = source.attrs.bold;
-    cell.inverse = source.attrs.reverse;
-    cell.underline = source.attrs.underline != VTERM_UNDERLINE_OFF;
-    cell.hidden = source.attrs.conceal;
-    cell.strikethrough = source.attrs.strike;
-    cell.fg = vterm_color_to_ansi(source.fg, true);
-    cell.bg = vterm_color_to_ansi(source.bg, false);
-    return cell;
+const TerminalEmulator::ScrollbackLine* TerminalEmulator::scrollback_line(size_t logical_index) const
+{
+    if (logical_index >= scrollback_count_ || scrollback_.empty()) {
+        return nullptr;
+    }
+    size_t slot = (scrollback_start_ + logical_index) % scrollback_.size();
+    return &scrollback_[slot];
+}
+
+bool TerminalEmulator::ensure_scrollback_slot()
+{
+    if (scrollback_count_ < scrollback_.size()) {
+        return true;
+    }
+    if (scrollback_.size() >= max_scrollback_lines_) {
+        return false;
+    }
+    if (!has_scrollback_heap_budget(sizeof(ScrollbackLine))) {
+        return false;
+    }
+    if (scrollback_start_ != 0 && !scrollback_.empty()) {
+        std::rotate(scrollback_.begin(), scrollback_.begin() + scrollback_start_, scrollback_.end());
+        scrollback_start_ = 0;
+    }
+    scrollback_.emplace_back();
+    return true;
+}
+
+void TerminalEmulator::drop_oldest_scrollback_line()
+{
+    if (scrollback_count_ == 0 || scrollback_.empty()) {
+        scrollback_start_ = 0;
+        scrollback_count_ = 0;
+        return;
+    }
+    scrollback_[scrollback_start_].clear();
+    scrollback_start_ = (scrollback_start_ + 1) % scrollback_.size();
+    --scrollback_count_;
+    if (scrollback_count_ == 0) {
+        scrollback_start_ = 0;
+    }
+}
+
+void TerminalEmulator::clear_scrollback()
+{
+    for (auto& line : scrollback_) {
+        line.clear();
+    }
+    std::vector<ScrollbackLine>().swap(scrollback_);
+    scrollback_start_ = 0;
+    scrollback_count_ = 0;
+}
+
+void TerminalEmulator::copy_scrollback_line(size_t logical_index, std::vector<TerminalCell>& out) const
+{
+    out.assign(cols_, kBlank);
+    const auto* source = scrollback_line(logical_index);
+    if (source == nullptr || source->cells == nullptr) {
+        return;
+    }
+    int limit = std::min<int>(source->cols, cols_);
+    for (int col = 0; col < limit; ++col) {
+        out[col] = unpack_cell(source->cells[col]);
+    }
 }
 
 void TerminalEmulator::mark_dirty(int row)
@@ -500,9 +717,6 @@ int TerminalEmulator::resize_callback(int rows, int cols, void* user)
     terminal->rows_ = clamp_int(rows, 4, 24);
     terminal->cols_ = clamp_int(cols, 8, 80);
     terminal->dirty_.assign(terminal->rows_, true);
-    for (auto& line : terminal->scrollback_) {
-        line.resize(terminal->cols_, kBlank);
-    }
     return 1;
 }
 
@@ -521,7 +735,7 @@ int TerminalEmulator::sb_clear_callback(void* user)
 {
     auto* terminal = static_cast<TerminalEmulator*>(user);
     if (terminal != nullptr) {
-        terminal->scrollback_.clear();
+        terminal->clear_scrollback();
     }
     return 1;
 }
