@@ -221,8 +221,13 @@ void UiApp::run()
     int selected = 0;
     while (true) {
         SshProfile default_profile;
-        std::string ssh_subtitle = load_default_ssh_profile(default_profile) ? profile_label(default_profile)
-                                                                             : "No SSH profile selected";
+        std::string ssh_subtitle;
+        if (has_selected_profile_) {
+            ssh_subtitle = "Selected: " + profile_label(selected_profile_);
+        } else {
+            ssh_subtitle = load_default_ssh_profile(default_profile) ? "Default: " + profile_label(default_profile)
+                                                                     : "No default SSH";
+        }
         std::vector<LauncherItem> items = {
             {LauncherIcon::kTerminal, "Terminal", ssh_subtitle},
             {LauncherIcon::kWifi, "Wi-Fi", wifi_.is_connected() ? wifi_.connected_ssid() : "Network setup"},
@@ -408,12 +413,17 @@ void UiApp::ssh_screen()
     }
 
     SshProfile profile = profiles[selected - 1];
-    std::vector<std::string> actions = {"Set default", "Edit", "Delete", "Back"};
+    std::vector<std::string> actions = {"Use for terminal", "Set default", "Edit", "Delete", "Back"};
     int action = menu(profile.name, actions, profile.host);
     if (action == 0) {
+        selected_profile_ = profile;
+        has_selected_profile_ = true;
+        pause("SSH", {"Selected for terminal", profile_label(profile)});
+    } else if (action == 1) {
+        has_selected_profile_ = false;
         store_.save_default_ssh_profile(profile.name);
         pause("SSH", {"Default set", profile_label(profile)});
-    } else if (action == 1) {
+    } else if (action == 2) {
         auto edited = edit_ssh_profile(profile);
         if (!edited.name.empty()) {
             if (edited.name != profile.name) {
@@ -423,8 +433,17 @@ void UiApp::ssh_screen()
                 }
             }
             store_.save_ssh_profile(edited);
+            if (has_selected_profile_ && selected_profile_.name == profile.name) {
+                selected_profile_ = edited;
+            }
+            if (active_profile_.name == profile.name) {
+                active_profile_ = edited;
+            }
         }
-    } else if (action == 2) {
+    } else if (action == 3) {
+        if (has_selected_profile_ && selected_profile_.name == profile.name) {
+            has_selected_profile_ = false;
+        }
         store_.delete_ssh_profile(profile.name);
     }
 }
@@ -451,31 +470,31 @@ void UiApp::status_screen()
         pause("Status", {wifi_state_text(wifi_), "IPv6: " + wifi_.ipv6_status(),
                          ssh_.connected() ? "SSH: connected" : "SSH: disconnected",
                          active_profile_.name.empty() ? "" : "SSH host: " + profile_label(active_profile_),
+                         has_selected_profile_ ? "Selected: " + profile_label(selected_profile_) : "",
                          ssh_.last_error().empty() ? "" : "SSH err: " + ssh_.last_error(),
                          terminal_chrome_label()});
     }
 }
 
-bool UiApp::load_default_ssh_profile(SshProfile& profile)
+bool UiApp::find_ssh_profile(const std::string& name, SshProfile& profile)
 {
-    auto profiles = store_.load_ssh_profiles();
-    if (profiles.empty()) {
+    if (name.empty()) {
         return false;
     }
-
-    std::string default_name = store_.load_default_ssh_profile();
-    if (!default_name.empty()) {
-        auto found = std::find_if(profiles.begin(), profiles.end(), [&](const auto& item) {
-            return item.name == default_name;
-        });
-        if (found != profiles.end()) {
-            profile = *found;
-            return true;
-        }
+    auto profiles = store_.load_ssh_profiles();
+    auto found = std::find_if(profiles.begin(), profiles.end(), [&](const auto& item) {
+        return item.name == name;
+    });
+    if (found == profiles.end()) {
+        return false;
     }
-
-    profile = profiles.front();
+    profile = *found;
     return true;
+}
+
+bool UiApp::load_default_ssh_profile(SshProfile& profile)
+{
+    return find_ssh_profile(store_.load_default_ssh_profile(), profile);
 }
 
 bool UiApp::choose_ssh_profile(SshProfile& profile)
@@ -504,10 +523,14 @@ bool UiApp::choose_ssh_profile(SshProfile& profile)
         }
         store_.save_ssh_profile(created);
         profile = created;
+        selected_profile_ = created;
+        has_selected_profile_ = true;
         return true;
     }
 
     profile = profiles[selected - 1];
+    selected_profile_ = profile;
+    has_selected_profile_ = true;
     return true;
 }
 
@@ -526,32 +549,79 @@ bool UiApp::connect_ssh_profile(const SshProfile& profile)
     }
 
     active_profile_ = profile;
-    store_.save_default_ssh_profile(profile.name);
     refresh_status_flags();
     return true;
+}
+
+bool UiApp::active_profile_is(const SshProfile& profile) const
+{
+    return ssh_.connected() && !active_profile_.name.empty() && active_profile_.name == profile.name;
 }
 
 void UiApp::terminal_screen()
 {
     SshProfile profile;
-    if (!ssh_.connected()) {
-        if (!load_default_ssh_profile(profile)) {
-            std::vector<std::string> actions = {"Choose SSH profile", "Add profile", "Back"};
-            int action = menu("Terminal", actions, "No default SSH");
-            if (action == 0) {
-                if (!choose_ssh_profile(profile)) {
-                    return;
-                }
-            } else if (action == 1) {
-                profile = edit_ssh_profile({});
-                if (profile.name.empty()) {
-                    return;
-                }
-                store_.save_ssh_profile(profile);
-            } else {
+
+    auto resolve_target = [&]() {
+        if (has_selected_profile_) {
+            SshProfile fresh;
+            if (find_ssh_profile(selected_profile_.name, fresh)) {
+                selected_profile_ = fresh;
+                profile = fresh;
+                return true;
+            }
+            has_selected_profile_ = false;
+        }
+        return load_default_ssh_profile(profile);
+    };
+
+    if (!resolve_target() && !ssh_.connected()) {
+        std::vector<std::string> actions = {"Choose SSH profile", "Add profile", "Back"};
+        int action = menu("Terminal", actions, "No default SSH");
+        if (action == 0) {
+            if (!choose_ssh_profile(profile)) {
                 return;
             }
+        } else if (action == 1) {
+            profile = edit_ssh_profile({});
+            if (profile.name.empty()) {
+                return;
+            }
+            store_.save_ssh_profile(profile);
+            selected_profile_ = profile;
+            has_selected_profile_ = true;
+        } else {
+            return;
         }
+    }
+
+    while (ssh_.connected() && resolve_target() && !active_profile_is(profile)) {
+        std::string current = active_profile_.name.empty() ? "Current SSH" : profile_label(active_profile_);
+        std::vector<std::string> actions = {"Switch server", "Keep current", "Choose other", "Back"};
+        int action = menu("Switch SSH?", actions, current + " -> " + profile_label(profile));
+        if (action == 0) {
+            ssh_.disconnect();
+            active_profile_ = {};
+            refresh_status_flags();
+            break;
+        }
+        if (action == 1) {
+            if (has_selected_profile_) {
+                has_selected_profile_ = false;
+            }
+            profile = active_profile_;
+            break;
+        }
+        if (action == 2) {
+            if (!choose_ssh_profile(profile)) {
+                return;
+            }
+            continue;
+        }
+        return;
+    }
+
+    if (!ssh_.connected()) {
         if (!wifi_.is_connected()) {
             pause("Terminal", {"Wi-Fi is not connected", "Open Wi-Fi first"});
             return;

@@ -28,9 +28,11 @@ private:
     void status_screen();
     void terminal_screen();
     SshProfile edit_ssh_profile(const SshProfile& initial);
+    bool find_ssh_profile(const std::string& name, SshProfile& profile);
     bool load_default_ssh_profile(SshProfile& profile);
     bool choose_ssh_profile(SshProfile& profile);
     bool connect_ssh_profile(const SshProfile& profile);
+    bool active_profile_is(const SshProfile& profile) const;
     void set_terminal_chrome_mode(TerminalChromeMode mode);
     std::string terminal_chrome_label() const;
     std::string profile_label(const SshProfile& profile) const;
@@ -42,6 +44,8 @@ private:
     SshClient& ssh_;
     TextInput input_;
     SshProfile active_profile_;
+    SshProfile selected_profile_;
+    bool has_selected_profile_ = false;
     TerminalChromeMode terminal_chrome_mode_ = TerminalChromeMode::kFull;
     bool settings_loaded_ = false;
 };

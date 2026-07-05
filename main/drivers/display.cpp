@@ -1,7 +1,6 @@
 #include "drivers/display.h"
 
 #include <algorithm>
-#include <cstdio>
 
 #include "M5Unified.hpp"
 #include "lgfx/Fonts/efont/lgfx_efont_cn.h"
@@ -15,6 +14,7 @@ constexpr uint32_t kFg = 0xE8F0F2;
 constexpr uint32_t kDim = 0x8EA0A8;
 constexpr uint32_t kAccent = 0x18C7A6;
 constexpr uint32_t kWarn = 0xFFB000;
+constexpr uint32_t kPanel = 0x18242D;
 constexpr int kHeaderFullHeight = 20;
 constexpr int kHeaderCompactHeight = 12;
 constexpr int kDefaultCellWidth = 6;
@@ -80,40 +80,77 @@ std::string fit_text(const std::string& text, int width)
     return text.substr(0, max_chars - 1) + "~";
 }
 
-std::string battery_status()
+int battery_level()
 {
     int level = M5.Power.getBatteryLevel();
-    bool valid = level >= 0 && level <= 100;
-    auto charging = M5.Power.isCharging();
+    if (level < 0 || level > 100) {
+        return -1;
+    }
+    return std::clamp(level, 0, 100);
+}
 
-    if (!valid) {
-        return charging == m5::Power_Class::is_charging ? "B:--+" : "B:--";
+bool battery_charging()
+{
+    return M5.Power.isCharging() == m5::Power_Class::is_charging;
+}
+
+void draw_status_wifi_icon(int x, int y)
+{
+    uint32_t color = g_wifi_connected ? kAccent : kDim;
+    int cx = x + 8;
+    int cy = y + 11;
+    M5.Display.drawArc(cx, cy, 9, 8, 220, 320, color);
+    M5.Display.drawArc(cx, cy, 6, 5, 225, 315, color);
+    M5.Display.fillCircle(cx, cy, 2, color);
+    if (!g_wifi_connected) {
+        M5.Display.drawLine(x + 2, y + 3, x + 14, y + 12, kWarn);
+    }
+}
+
+void draw_status_ssh_icon(int x, int y)
+{
+    uint32_t color = g_ssh_connected ? kAccent : kDim;
+    M5.Display.drawRoundRect(x + 3, y + 5, 12, 8, 2, color);
+    M5.Display.drawRoundRect(x + 6, y + 1, 6, 8, 3, color);
+    M5.Display.fillCircle(x + 9, y + 9, 1, color);
+    if (!g_ssh_connected) {
+        M5.Display.drawLine(x + 2, y + 3, x + 16, y + 12, kWarn);
+    }
+}
+
+void draw_status_battery_icon(int x, int y)
+{
+    int level = battery_level();
+    bool charging = battery_charging();
+    uint32_t outline = level >= 0 ? kDim : dim_color(kDim);
+    uint32_t fill = level >= 0 && level <= 15 ? kWarn : kAccent;
+
+    M5.Display.drawRect(x, y + 2, 20, 8, outline);
+    M5.Display.fillRect(x + 20, y + 5, 2, 3, outline);
+
+    if (level >= 0) {
+        int fill_width = std::clamp((level * 16 + 99) / 100, 1, 16);
+        M5.Display.fillRect(x + 2, y + 4, fill_width, 4, fill);
+    } else {
+        M5.Display.drawFastHLine(x + 5, y + 6, 10, outline);
     }
 
-    char buffer[8] = {};
-    std::snprintf(buffer, sizeof(buffer), "%02d", std::clamp(level, 0, 100));
-    std::string out = "B:";
-    out += buffer;
-    out += charging == m5::Power_Class::is_charging ? "+" : "%";
-    return out;
+    if (charging) {
+        M5.Display.drawLine(x + 10, y + 3, x + 7, y + 8, kWarn);
+        M5.Display.drawLine(x + 7, y + 8, x + 12, y + 7, kWarn);
+        M5.Display.drawLine(x + 12, y + 7, x + 9, y + 11, kWarn);
+    }
 }
 
-std::string status_text()
+void draw_status_icons(int y)
 {
-    return std::string(g_wifi_connected ? "W:OK " : "W:-- ") + (g_ssh_connected ? "S:OK " : "S:-- ") +
-           battery_status();
-}
-
-void draw_status_text(int y)
-{
-    std::string status = status_text();
+    constexpr int kStatusWidth = 68;
     int width = M5.Display.width();
-    int text_width = static_cast<int>(status.size()) * 6;
-    int x = std::max(6, width - text_width - 4);
-    M5.Display.fillRect(x - 2, std::max(0, y - 2), width - x + 2, 14, kBg);
-    M5.Display.setTextColor(kDim, kBg);
-    M5.Display.setCursor(x, y);
-    M5.Display.print(status.c_str());
+    int x = std::max(4, width - kStatusWidth - 4);
+    M5.Display.fillRect(x - 2, std::max(0, y - 2), kStatusWidth + 6, 16, kBg);
+    draw_status_wifi_icon(x, y);
+    draw_status_ssh_icon(x + 22, y);
+    draw_status_battery_icon(x + 44, y);
 }
 
 uint8_t font_byte(const uint8_t* ptr)
@@ -349,8 +386,8 @@ void header(const std::string& title)
     M5.Display.fillScreen(kBg);
     M5.Display.setTextColor(kAccent, kBg);
     M5.Display.setCursor(6, 4);
-    M5.Display.print(fit_text(title, M5.Display.width() - 118).c_str());
-    draw_status_text(4);
+    M5.Display.print(fit_text(title, M5.Display.width() - 84).c_str());
+    draw_status_icons(3);
     M5.Display.drawFastHLine(0, 18, M5.Display.width(), kAccent);
 }
 
@@ -369,8 +406,8 @@ void terminal_header(const TerminalLayout& layout, const std::string& title)
     M5.Display.fillScreen(kBg);
     M5.Display.setTextColor(kAccent, kBg);
     M5.Display.setCursor(4, 2);
-    M5.Display.print(fit_text(title, M5.Display.width() - 112).c_str());
-    draw_status_text(2);
+    M5.Display.print(fit_text(title, M5.Display.width() - 80).c_str());
+    draw_status_icons(0);
     M5.Display.drawFastHLine(0, kHeaderCompactHeight - 1, M5.Display.width(), kAccent);
 }
 
@@ -380,7 +417,7 @@ void draw_header_status()
         return;
     }
     use_ui_font();
-    draw_status_text(g_terminal_chrome_mode == TerminalChromeMode::kCompact ? 2 : 4);
+    draw_status_icons(g_terminal_chrome_mode == TerminalChromeMode::kCompact ? 0 : 3);
 }
 
 void draw_terminal_icon(int cx, int y, uint32_t color)
@@ -545,10 +582,14 @@ void Display::show_launcher(const std::vector<LauncherItem>& items, int selected
     int cx = width / 2;
 
     uint32_t icon_color = kAccent;
+    M5.Display.fillCircle(cx, 52, 31, kPanel);
+    M5.Display.drawCircle(cx, 52, 31, dim_color(kAccent));
     draw_launcher_icon(item.icon, cx, 34, icon_color);
 
-    M5.Display.fillTriangle(14, 66, 24, 58, 24, 74, kDim);
-    M5.Display.fillTriangle(width - 14, 66, width - 24, 58, width - 24, 74, kDim);
+    M5.Display.drawLine(18, 62, 10, 68, kDim);
+    M5.Display.drawLine(10, 68, 18, 74, kDim);
+    M5.Display.drawLine(width - 18, 62, width - 10, 68, kDim);
+    M5.Display.drawLine(width - 10, 68, width - 18, 74, kDim);
 
     M5.Display.setTextColor(kFg, kBg);
     M5.Display.setCursor(std::max(6, cx - static_cast<int>(item.title.size()) * 3), 84);
@@ -562,7 +603,11 @@ void Display::show_launcher(const std::vector<LauncherItem>& items, int selected
     int dots_width = static_cast<int>(items.size()) * 10 - 4;
     int dot_x = cx - dots_width / 2;
     for (int i = 0; i < static_cast<int>(items.size()); ++i) {
-        M5.Display.fillCircle(dot_x + i * 10, 116, i == selected ? 3 : 2, i == selected ? kAccent : kDim);
+        if (i == selected) {
+            M5.Display.fillRoundRect(dot_x + i * 10 - 4, 113, 8, 5, 2, kAccent);
+        } else {
+            M5.Display.fillCircle(dot_x + i * 10, 116, 2, dim_color(kDim));
+        }
     }
 
     M5.Display.setTextColor(kDim, kBg);
