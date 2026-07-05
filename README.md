@@ -130,11 +130,10 @@ git push origin v0.1.0
 Release assets include:
 
 - Firmware image: `cardputer_adv_ssh.bin`
-- Bootloader image
-- Partition table image
-- Flash arguments
 - SHA-256 checksums
-- A source archive for the tagged commit
+- Release README
+
+GitHub also provides the standard source code ZIP and TAR.GZ archives automatically for each tag.
 
 The workflow can also be run manually with an optional `release_tag`.
 

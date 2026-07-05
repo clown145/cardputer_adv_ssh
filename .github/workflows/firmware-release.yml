@@ -63,7 +63,7 @@ jobs:
           idf.py set-target "${IDF_TARGET}"
           idf.py build
 
-      - name: Package firmware and source
+      - name: Package release assets
         shell: bash
         run: |
           set -euo pipefail
@@ -73,15 +73,6 @@ jobs:
           mkdir -p "${dist}"
 
           cp "build/${PROJECT_NAME}.bin" "${dist}/${PROJECT_NAME}.bin"
-          cp "build/bootloader/bootloader.bin" "${dist}/bootloader.bin"
-          cp "build/partition_table/partition-table.bin" "${dist}/partition-table.bin"
-          cp "build/flash_args" "${dist}/flash_args.txt"
-
-          git archive \
-            --format=tar.gz \
-            --prefix="${PROJECT_NAME}-${version}/" \
-            -o "${dist}/${PROJECT_NAME}-${version}-source.tar.gz" \
-            HEAD
 
           {
             echo "Project: ${PROJECT_NAME}"
@@ -93,7 +84,7 @@ jobs:
             echo "This release is built for M5Stack Cardputer-Adv / cardputer_adv."
           } > "${dist}/README.txt"
 
-          (cd "${dist}" && sha256sum * > "SHA256SUMS.txt")
+          (cd "${dist}" && sha256sum "${PROJECT_NAME}.bin" README.txt > "SHA256SUMS.txt")
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

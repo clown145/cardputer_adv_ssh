@@ -130,11 +130,10 @@ git push origin v0.1.0
 Release 产物包括：
 
 - 固件：`cardputer_adv_ssh.bin`
-- bootloader
-- partition table
-- flash 参数
 - SHA-256 校验文件
-- 对应 tag 代码的源码压缩包
+- Release README
+
+GitHub 会自动为每个 tag 提供标准的源码 ZIP 和 TAR.GZ 压缩包。
 
 也可以在 GitHub Actions 页面手动运行 workflow，并可选填写 `release_tag`。
 
