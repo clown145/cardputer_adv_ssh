@@ -16,8 +16,11 @@ namespace {
 constexpr const char* TAG = "settings";
 constexpr const char* NS_WIFI = "wifi_profiles";
 constexpr const char* NS_SSH = "ssh_profiles";
+constexpr const char* NS_APP = "app_settings";
 constexpr const char* KEY_WIFI_INDEX = "wifi_index";
 constexpr const char* KEY_SSH_INDEX = "ssh_index";
+constexpr const char* KEY_DEFAULT_SSH = "default_ssh";
+constexpr const char* KEY_TERMINAL_CHROME = "term_chrome";
 
 std::string make_key(const std::string& prefix, const std::string& id)
 {
@@ -149,7 +152,30 @@ esp_err_t SettingsStore::delete_ssh_profile(const std::string& name)
     erase_namespace_key(NS_SSH, make_key("o", name));
     erase_namespace_key(NS_SSH, make_key("u", name));
     erase_namespace_key(NS_SSH, make_key("p", name));
+    if (load_default_ssh_profile() == name) {
+        save_default_ssh_profile("");
+    }
     return save_index(KEY_SSH_INDEX, index);
+}
+
+std::string SettingsStore::load_default_ssh_profile()
+{
+    return get_string(NS_APP, KEY_DEFAULT_SSH);
+}
+
+esp_err_t SettingsStore::save_default_ssh_profile(const std::string& name)
+{
+    return set_string(NS_APP, KEY_DEFAULT_SSH, name);
+}
+
+std::string SettingsStore::load_terminal_chrome_mode()
+{
+    return get_string(NS_APP, KEY_TERMINAL_CHROME);
+}
+
+esp_err_t SettingsStore::save_terminal_chrome_mode(const std::string& mode)
+{
+    return set_string(NS_APP, KEY_TERMINAL_CHROME, mode);
 }
 
 std::vector<std::string> SettingsStore::load_index(const char* key, int max_count)

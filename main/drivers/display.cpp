@@ -1,6 +1,7 @@
 #include "drivers/display.h"
 
 #include <algorithm>
+#include <cstdio>
 
 #include "M5Unified.hpp"
 #include "lgfx/Fonts/efont/lgfx_efont_cn.h"
@@ -14,12 +15,14 @@ constexpr uint32_t kFg = 0xE8F0F2;
 constexpr uint32_t kDim = 0x8EA0A8;
 constexpr uint32_t kAccent = 0x18C7A6;
 constexpr uint32_t kWarn = 0xFFB000;
-constexpr int kTerminalTop = 20;
+constexpr int kHeaderFullHeight = 20;
+constexpr int kHeaderCompactHeight = 12;
 constexpr int kDefaultCellWidth = 6;
 constexpr int kDefaultCellHeight = 12;
 
 bool g_wifi_connected = false;
 bool g_ssh_connected = false;
+TerminalChromeMode g_terminal_chrome_mode = TerminalChromeMode::kFull;
 
 uint32_t ansi_color(uint8_t color, bool bold);
 
@@ -32,6 +35,19 @@ uint32_t dim_color(uint32_t color)
     g = static_cast<uint8_t>(g * 2 / 3);
     b = static_cast<uint8_t>(b * 2 / 3);
     return (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | b;
+}
+
+int terminal_chrome_height(TerminalChromeMode mode)
+{
+    switch (mode) {
+        case TerminalChromeMode::kHidden:
+            return 0;
+        case TerminalChromeMode::kCompact:
+            return kHeaderCompactHeight;
+        case TerminalChromeMode::kFull:
+        default:
+            return kHeaderFullHeight;
+    }
 }
 
 void use_ui_font()
@@ -50,6 +66,54 @@ void use_terminal_font(const TerminalLayout& layout)
     }
     M5.Display.setTextSize(layout.ascii_size);
     M5.Display.setTextWrap(false, false);
+}
+
+std::string fit_text(const std::string& text, int width)
+{
+    int max_chars = std::max(0, width / 6);
+    if (static_cast<int>(text.size()) <= max_chars) {
+        return text;
+    }
+    if (max_chars <= 1) {
+        return "";
+    }
+    return text.substr(0, max_chars - 1) + "~";
+}
+
+std::string battery_status()
+{
+    int level = M5.Power.getBatteryLevel();
+    bool valid = level >= 0 && level <= 100;
+    auto charging = M5.Power.isCharging();
+
+    if (!valid) {
+        return charging == m5::Power_Class::is_charging ? "B:--+" : "B:--";
+    }
+
+    char buffer[8] = {};
+    std::snprintf(buffer, sizeof(buffer), "%02d", std::clamp(level, 0, 100));
+    std::string out = "B:";
+    out += buffer;
+    out += charging == m5::Power_Class::is_charging ? "+" : "%";
+    return out;
+}
+
+std::string status_text()
+{
+    return std::string(g_wifi_connected ? "W:OK " : "W:-- ") + (g_ssh_connected ? "S:OK " : "S:-- ") +
+           battery_status();
+}
+
+void draw_status_text(int y)
+{
+    std::string status = status_text();
+    int width = M5.Display.width();
+    int text_width = static_cast<int>(status.size()) * 6;
+    int x = std::max(6, width - text_width - 4);
+    M5.Display.fillRect(x - 2, std::max(0, y - 2), width - x + 2, 14, kBg);
+    M5.Display.setTextColor(kDim, kBg);
+    M5.Display.setCursor(x, y);
+    M5.Display.print(status.c_str());
 }
 
 uint8_t font_byte(const uint8_t* ptr)
@@ -193,7 +257,7 @@ bool draw_efont_cn_glyph(uint32_t codepoint, int x, int y, uint32_t fg, int scal
 void draw_terminal_line(const std::vector<TerminalCell>& line, int row, const TerminalLayout& layout, bool show_cursor,
                         int cursor_row, int cursor_col)
 {
-    int y = kTerminalTop + row * layout.cell_height;
+    int y = layout.top + row * layout.cell_height;
     for (int col = 0; col < layout.cols; ++col) {
         const auto& cell = col < static_cast<int>(line.size()) ? line[col] : TerminalCell{};
         bool cursor = show_cursor && row == cursor_row && col == cursor_col;
@@ -285,22 +349,89 @@ void header(const std::string& title)
     M5.Display.fillScreen(kBg);
     M5.Display.setTextColor(kAccent, kBg);
     M5.Display.setCursor(6, 4);
-    M5.Display.print(title.c_str());
-    M5.Display.setTextColor(kDim, kBg);
-    M5.Display.setCursor(M5.Display.width() - 70, 4);
-    M5.Display.print(g_wifi_connected ? "W:OK " : "W:-- ");
-    M5.Display.print(g_ssh_connected ? "S:OK" : "S:--");
+    M5.Display.print(fit_text(title, M5.Display.width() - 118).c_str());
+    draw_status_text(4);
     M5.Display.drawFastHLine(0, 18, M5.Display.width(), kAccent);
+}
+
+void terminal_header(const TerminalLayout& layout, const std::string& title)
+{
+    if (layout.chrome == TerminalChromeMode::kHidden) {
+        M5.Display.fillScreen(0x000000);
+        return;
+    }
+    if (layout.chrome == TerminalChromeMode::kFull) {
+        header(title);
+        return;
+    }
+
+    use_ui_font();
+    M5.Display.fillScreen(kBg);
+    M5.Display.setTextColor(kAccent, kBg);
+    M5.Display.setCursor(4, 2);
+    M5.Display.print(fit_text(title, M5.Display.width() - 112).c_str());
+    draw_status_text(2);
+    M5.Display.drawFastHLine(0, kHeaderCompactHeight - 1, M5.Display.width(), kAccent);
 }
 
 void draw_header_status()
 {
+    if (g_terminal_chrome_mode == TerminalChromeMode::kHidden) {
+        return;
+    }
     use_ui_font();
-    M5.Display.fillRect(M5.Display.width() - 74, 2, 74, 14, kBg);
-    M5.Display.setTextColor(kDim, kBg);
-    M5.Display.setCursor(M5.Display.width() - 70, 4);
-    M5.Display.print(g_wifi_connected ? "W:OK " : "W:-- ");
-    M5.Display.print(g_ssh_connected ? "S:OK" : "S:--");
+    draw_status_text(g_terminal_chrome_mode == TerminalChromeMode::kCompact ? 2 : 4);
+}
+
+void draw_terminal_icon(int cx, int y, uint32_t color)
+{
+    M5.Display.drawRect(cx - 24, y, 48, 34, color);
+    M5.Display.fillRect(cx - 22, y + 2, 44, 30, 0x000000);
+    M5.Display.drawFastHLine(cx - 18, y + 8, 8, color);
+    M5.Display.drawFastVLine(cx - 10, y + 8, 8, color);
+    M5.Display.drawFastHLine(cx - 4, y + 18, 14, color);
+}
+
+void draw_wifi_icon(int cx, int y, uint32_t color)
+{
+    M5.Display.drawArc(cx, y + 32, 26, 22, 215, 325, color);
+    M5.Display.drawArc(cx, y + 32, 18, 14, 220, 320, color);
+    M5.Display.drawArc(cx, y + 32, 10, 6, 230, 310, color);
+    M5.Display.fillCircle(cx, y + 32, 3, color);
+}
+
+void draw_ssh_icon(int cx, int y, uint32_t color)
+{
+    M5.Display.drawRect(cx - 21, y + 10, 42, 25, color);
+    M5.Display.drawRoundRect(cx - 12, y, 24, 22, 8, color);
+    M5.Display.fillCircle(cx, y + 22, 3, color);
+    M5.Display.drawFastVLine(cx, y + 25, 6, color);
+}
+
+void draw_status_icon(int cx, int y, uint32_t color)
+{
+    M5.Display.drawCircle(cx, y + 18, 18, color);
+    M5.Display.fillCircle(cx, y + 10, 2, color);
+    M5.Display.fillRect(cx - 1, y + 16, 3, 14, color);
+}
+
+void draw_launcher_icon(LauncherIcon icon, int cx, int y, uint32_t color)
+{
+    switch (icon) {
+        case LauncherIcon::kWifi:
+            draw_wifi_icon(cx, y, color);
+            break;
+        case LauncherIcon::kSsh:
+            draw_ssh_icon(cx, y, color);
+            break;
+        case LauncherIcon::kStatus:
+            draw_status_icon(cx, y, color);
+            break;
+        case LauncherIcon::kTerminal:
+        default:
+            draw_terminal_icon(cx, y, color);
+            break;
+    }
 }
 }  // namespace
 
@@ -319,10 +450,17 @@ void Display::set_status_flags(bool wifi_connected, bool ssh_connected)
     g_ssh_connected = ssh_connected;
 }
 
+void Display::set_terminal_chrome_mode(TerminalChromeMode mode)
+{
+    g_terminal_chrome_mode = mode;
+}
+
 TerminalLayout Display::terminal_layout(TerminalFontMode mode) const
 {
     TerminalLayout layout;
     layout.mode = mode;
+    layout.chrome = g_terminal_chrome_mode;
+    layout.top = terminal_chrome_height(g_terminal_chrome_mode);
 
     switch (mode) {
         case TerminalFontMode::kReadable:
@@ -350,7 +488,7 @@ TerminalLayout Display::terminal_layout(TerminalFontMode mode) const
     }
 
     int width = std::max(1, static_cast<int>(M5.Display.width()));
-    int height = std::max(1, static_cast<int>(M5.Display.height()) - kTerminalTop);
+    int height = std::max(1, static_cast<int>(M5.Display.height()) - layout.top);
     layout.cols = std::max(8, width / layout.cell_width);
     layout.rows = std::max(4, height / layout.cell_height);
     return layout;
@@ -391,6 +529,45 @@ void Display::show_menu(const std::string& title, const std::vector<std::string>
     M5.Display.setTextColor(kDim, kBg);
     M5.Display.setCursor(6, M5.Display.height() - 10);
     M5.Display.print(footer.c_str());
+}
+
+void Display::show_launcher(const std::vector<LauncherItem>& items, int selected, const std::string& footer)
+{
+    header("Cardputer-Adv");
+    if (items.empty()) {
+        return;
+    }
+
+    selected = std::clamp(selected, 0, static_cast<int>(items.size()) - 1);
+    const auto& item = items[selected];
+    int width = M5.Display.width();
+    int height = M5.Display.height();
+    int cx = width / 2;
+
+    uint32_t icon_color = kAccent;
+    draw_launcher_icon(item.icon, cx, 34, icon_color);
+
+    M5.Display.fillTriangle(14, 66, 24, 58, 24, 74, kDim);
+    M5.Display.fillTriangle(width - 14, 66, width - 24, 58, width - 24, 74, kDim);
+
+    M5.Display.setTextColor(kFg, kBg);
+    M5.Display.setCursor(std::max(6, cx - static_cast<int>(item.title.size()) * 3), 84);
+    M5.Display.print(fit_text(item.title, width - 12).c_str());
+
+    M5.Display.setTextColor(kDim, kBg);
+    std::string subtitle = fit_text(item.subtitle, width - 12);
+    M5.Display.setCursor(std::max(6, cx - static_cast<int>(subtitle.size()) * 3), 98);
+    M5.Display.print(subtitle.c_str());
+
+    int dots_width = static_cast<int>(items.size()) * 10 - 4;
+    int dot_x = cx - dots_width / 2;
+    for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+        M5.Display.fillCircle(dot_x + i * 10, 116, i == selected ? 3 : 2, i == selected ? kAccent : kDim);
+    }
+
+    M5.Display.setTextColor(kDim, kBg);
+    M5.Display.setCursor(6, height - 10);
+    M5.Display.print(fit_text(footer, width - 12).c_str());
 }
 
 void Display::show_text_input(const std::string& title, const std::string& label, const std::string& value, bool secret)
@@ -450,10 +627,10 @@ void Display::draw_terminal_frame()
 
 void Display::draw_terminal_frame(const TerminalLayout& layout, const std::string& title)
 {
-    header(title);
+    terminal_header(layout, title);
     int terminal_height = layout.rows * layout.cell_height;
-    M5.Display.fillRect(0, kTerminalTop, M5.Display.width(), terminal_height, 0x000000);
-    int used_bottom = kTerminalTop + terminal_height;
+    M5.Display.fillRect(0, layout.top, M5.Display.width(), terminal_height, 0x000000);
+    int used_bottom = layout.top + terminal_height;
     if (used_bottom < M5.Display.height()) {
         M5.Display.fillRect(0, used_bottom, M5.Display.width(), M5.Display.height() - used_bottom, kBg);
     }

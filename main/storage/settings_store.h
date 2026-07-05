@@ -33,6 +33,11 @@ public:
     std::vector<SshProfile> load_ssh_profiles();
     esp_err_t save_ssh_profile(const SshProfile& profile);
     esp_err_t delete_ssh_profile(const std::string& name);
+    std::string load_default_ssh_profile();
+    esp_err_t save_default_ssh_profile(const std::string& name);
+
+    std::string load_terminal_chrome_mode();
+    esp_err_t save_terminal_chrome_mode(const std::string& mode);
 
 private:
     static constexpr int kMaxWifiProfiles = 8;

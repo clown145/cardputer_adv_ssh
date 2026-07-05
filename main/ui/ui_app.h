@@ -18,13 +18,21 @@ public:
     void run();
 
 private:
+    void load_settings();
     void refresh_status_flags();
+    int launcher(const std::vector<LauncherItem>& items, int selected, const std::string& footer);
     int menu(const std::string& title, const std::vector<std::string>& items, const std::string& footer);
     void pause(const std::string& title, const std::vector<std::string>& lines);
     void wifi_screen();
     void ssh_screen();
+    void status_screen();
     void terminal_screen();
     SshProfile edit_ssh_profile(const SshProfile& initial);
+    bool load_default_ssh_profile(SshProfile& profile);
+    bool choose_ssh_profile(SshProfile& profile);
+    bool connect_ssh_profile(const SshProfile& profile);
+    void set_terminal_chrome_mode(TerminalChromeMode mode);
+    std::string terminal_chrome_label() const;
     std::string profile_label(const SshProfile& profile) const;
 
     Display& display_;
@@ -34,6 +42,8 @@ private:
     SshClient& ssh_;
     TextInput input_;
     SshProfile active_profile_;
+    TerminalChromeMode terminal_chrome_mode_ = TerminalChromeMode::kFull;
+    bool settings_loaded_ = false;
 };
 
 }  // namespace adv
