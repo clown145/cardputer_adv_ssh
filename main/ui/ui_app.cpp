@@ -15,6 +15,25 @@ constexpr const char* kChromeFull = "full";
 constexpr const char* kChromeCompact = "compact";
 constexpr const char* kChromeHidden = "hidden";
 
+struct ThemeOption {
+    TerminalTheme theme;
+    const char* storage;
+    const char* label;
+};
+
+static constexpr ThemeOption kThemeOptions[] = {
+    {TerminalTheme::kAdvDark, "adv_dark", "Adv Dark"},
+    {TerminalTheme::kTrueBlack, "true_black", "True Black"},
+    {TerminalTheme::kSolarizedDark, "solarized_dark", "Solarized Dark"},
+    {TerminalTheme::kGruvboxDark, "gruvbox_dark", "Gruvbox Dark"},
+    {TerminalTheme::kDracula, "dracula", "Dracula"},
+    {TerminalTheme::kNord, "nord", "Nord"},
+    {TerminalTheme::kTokyoNight, "tokyo_night", "Tokyo Night"},
+    {TerminalTheme::kCatppuccinMocha, "catppuccin_mocha", "Catppuccin Mocha"},
+    {TerminalTheme::kMonokai, "monokai", "Monokai"},
+};
+constexpr int kThemeOptionCount = sizeof(kThemeOptions) / sizeof(kThemeOptions[0]);
+
 std::string wifi_state_text(const WifiManager& wifi)
 {
     if (wifi.is_connected()) {
@@ -193,6 +212,36 @@ std::string chrome_mode_text(TerminalChromeMode mode)
             return "Chrome: full";
     }
 }
+
+TerminalTheme parse_terminal_theme(const std::string& raw)
+{
+    for (const auto& option : kThemeOptions) {
+        if (raw == option.storage) {
+            return option.theme;
+        }
+    }
+    return TerminalTheme::kAdvDark;
+}
+
+std::string theme_storage_value(TerminalTheme theme)
+{
+    for (const auto& option : kThemeOptions) {
+        if (option.theme == theme) {
+            return option.storage;
+        }
+    }
+    return kThemeOptions[0].storage;
+}
+
+std::string theme_text(TerminalTheme theme)
+{
+    for (const auto& option : kThemeOptions) {
+        if (option.theme == theme) {
+            return std::string("Theme: ") + option.label;
+        }
+    }
+    return std::string("Theme: ") + kThemeOptions[0].label;
+}
 }  // namespace
 
 UiApp::UiApp(Display& display, Keyboard& keyboard, SettingsStore& store, WifiManager& wifi, SshClient& ssh,
@@ -209,6 +258,8 @@ void UiApp::load_settings()
     }
     terminal_chrome_mode_ = parse_chrome_mode(store_.load_terminal_chrome_mode());
     display_.set_terminal_chrome_mode(terminal_chrome_mode_);
+    terminal_theme_ = parse_terminal_theme(store_.load_terminal_theme());
+    display_.set_terminal_theme(terminal_theme_);
     settings_loaded_ = true;
 }
 
@@ -216,6 +267,7 @@ void UiApp::refresh_status_flags()
 {
     display_.set_status_flags(wifi_.is_connected(), ssh_.connected());
     display_.set_terminal_chrome_mode(terminal_chrome_mode_);
+    display_.set_terminal_theme(terminal_theme_);
 }
 
 void UiApp::run()
@@ -404,14 +456,20 @@ void UiApp::webui_screen()
         return;
     }
 
-    while (true) {
+    std::string shown_ip;
+    auto draw_webui_status = [&]() {
         refresh_status_flags();
-        std::string ip = wifi_.ipv4_address();
+        shown_ip = wifi_.ipv4_address();
         display_.show_status("WebUI", {"Running",
-                                        ip.empty() ? "IP address unavailable" : "http://" + ip + "/",
+                                        shown_ip.empty() ? "IP address unavailable" : "http://" + shown_ip + "/",
                                         "Password: " + web_.password(),
                                         "Enter/Esc stop"});
+    };
 
+    draw_webui_status();
+    TickType_t last_ip_check = xTaskGetTickCount();
+
+    while (true) {
         auto event = keyboard_.poll();
         if (event.has_value() && (event->kind == KeyKind::kEnter || event->kind == KeyKind::kEscape)) {
             break;
@@ -419,12 +477,22 @@ void UiApp::webui_screen()
         if (!wifi_.is_connected()) {
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(250));
+        TickType_t now = xTaskGetTickCount();
+        if ((now - last_ip_check) >= pdMS_TO_TICKS(1000)) {
+            std::string ip = wifi_.ipv4_address();
+            if (ip != shown_ip) {
+                draw_webui_status();
+            }
+            last_ip_check = now;
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
 
     web_.stop();
     terminal_chrome_mode_ = parse_chrome_mode(store_.load_terminal_chrome_mode());
+    terminal_theme_ = parse_terminal_theme(store_.load_terminal_theme());
     display_.set_terminal_chrome_mode(terminal_chrome_mode_);
+    display_.set_terminal_theme(terminal_theme_);
 }
 
 void UiApp::ssh_screen()
@@ -494,10 +562,11 @@ void UiApp::status_screen()
 {
     std::vector<std::string> items = {
         "Terminal chrome",
+        "Terminal theme",
         "Connection status",
         "Back",
     };
-    int selected = menu("Status", items, terminal_chrome_label());
+    int selected = menu("Status", items, terminal_theme_label());
     if (selected == 0) {
         std::vector<std::string> modes = {"Full", "Compact", "Hidden", "Back"};
         int chosen = menu("Terminal Chrome", modes, terminal_chrome_label());
@@ -509,12 +578,22 @@ void UiApp::status_screen()
             set_terminal_chrome_mode(TerminalChromeMode::kHidden);
         }
     } else if (selected == 1) {
+        std::vector<std::string> themes;
+        for (const auto& option : kThemeOptions) {
+            themes.push_back(option.label);
+        }
+        themes.push_back("Back");
+        int chosen = menu("Terminal Theme", themes, terminal_theme_label());
+        if (chosen >= 0 && chosen < kThemeOptionCount) {
+            set_terminal_theme(kThemeOptions[chosen].theme);
+        }
+    } else if (selected == 2) {
         pause("Status", {wifi_state_text(wifi_), "IPv6: " + wifi_.ipv6_status(),
                          ssh_.connected() ? "SSH: connected" : "SSH: disconnected",
                          active_profile_.name.empty() ? "" : "SSH host: " + profile_label(active_profile_),
                          has_selected_profile_ ? "Selected: " + profile_label(selected_profile_) : "",
                          ssh_.last_error().empty() ? "" : "SSH err: " + ssh_.last_error(),
-                         terminal_chrome_label()});
+                         terminal_chrome_label(), terminal_theme_label()});
     }
 }
 
@@ -905,9 +984,21 @@ void UiApp::set_terminal_chrome_mode(TerminalChromeMode mode)
     store_.save_terminal_chrome_mode(chrome_mode_storage_value(mode));
 }
 
+void UiApp::set_terminal_theme(TerminalTheme theme)
+{
+    terminal_theme_ = theme;
+    display_.set_terminal_theme(theme);
+    store_.save_terminal_theme(theme_storage_value(theme));
+}
+
 std::string UiApp::terminal_chrome_label() const
 {
     return chrome_mode_text(terminal_chrome_mode_);
+}
+
+std::string UiApp::terminal_theme_label() const
+{
+    return theme_text(terminal_theme_);
 }
 
 std::string UiApp::profile_label(const SshProfile& profile) const

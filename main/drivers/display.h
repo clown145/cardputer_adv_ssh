@@ -19,6 +19,19 @@ enum class TerminalChromeMode {
     kHidden,
 };
 
+enum class TerminalTheme {
+    kAdvDark,
+    kTrueBlack,
+    kSolarizedDark,
+    kGruvboxDark,
+    kDracula,
+    kNord,
+    kTokyoNight,
+    kCatppuccinMocha,
+    kMonokai,
+    kCount,
+};
+
 enum class LauncherIcon {
     kTerminal,
     kWifi,
@@ -51,6 +64,7 @@ public:
     void begin();
     void set_status_flags(bool wifi_connected, bool ssh_connected);
     void set_terminal_chrome_mode(TerminalChromeMode mode);
+    void set_terminal_theme(TerminalTheme theme);
     TerminalLayout terminal_layout(TerminalFontMode mode) const;
     void show_status(const std::string& title, const std::vector<std::string>& lines);
     void show_menu(const std::string& title, const std::vector<std::string>& items, int selected,

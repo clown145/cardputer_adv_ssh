@@ -37,7 +37,9 @@ private:
     bool connect_ssh_profile(const SshProfile& profile);
     bool active_profile_is(const SshProfile& profile) const;
     void set_terminal_chrome_mode(TerminalChromeMode mode);
+    void set_terminal_theme(TerminalTheme theme);
     std::string terminal_chrome_label() const;
+    std::string terminal_theme_label() const;
     std::string profile_label(const SshProfile& profile) const;
 
     Display& display_;
@@ -51,6 +53,7 @@ private:
     SshProfile selected_profile_;
     bool has_selected_profile_ = false;
     TerminalChromeMode terminal_chrome_mode_ = TerminalChromeMode::kFull;
+    TerminalTheme terminal_theme_ = TerminalTheme::kAdvDark;
     bool settings_loaded_ = false;
 };
 

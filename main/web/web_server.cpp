@@ -89,6 +89,8 @@ button.primary{background:var(--accent);border-color:var(--accent);color:white}b
 <h2>Terminal</h2>
 <label for="chrome">Chrome mode</label>
 <select id="chrome"><option value="full">Full</option><option value="compact">Compact</option><option value="hidden">Hidden</option></select>
+<label for="theme">Theme</label>
+<select id="theme"><option value="adv_dark">Adv Dark</option><option value="true_black">True Black</option><option value="solarized_dark">Solarized Dark</option><option value="gruvbox_dark">Gruvbox Dark</option><option value="dracula">Dracula</option><option value="nord">Nord</option><option value="tokyo_night">Tokyo Night</option><option value="catppuccin_mocha">Catppuccin Mocha</option><option value="monokai">Monokai</option></select>
 <div class="row" style="margin-top:12px"><button class="primary" onclick="saveSettings()">Save</button></div>
 </section>
 <section class="panel">
@@ -126,6 +128,7 @@ function serverText(p){return p.server||`${p.username}@${p.host}${p.port&&p.port
 function render(){
   $("badge").textContent=state.defaultProfile?`Default: ${state.defaultProfile}`:"WebUI";
   $("chrome").value=state.terminalChrome||"full";
+  $("theme").value=state.terminalTheme||"adv_dark";
   $("publicKey").value=state.publicKey||"";
   $("profiles").innerHTML=(state.profiles||[]).map(p=>`<div class="item"><span>${escapeHtml(serverText(p))}</span><span class="muted">${p.name===state.defaultProfile?"default":""}</span></div>`).join("")||"<div class=\"muted\">No profiles</div>";
   $("profilePick").innerHTML="<option value=''>New profile</option>"+(state.profiles||[]).map(p=>`<option value="${escapeHtml(p.name)}">${escapeHtml(serverText(p))}</option>`).join("");
@@ -152,7 +155,7 @@ function setDefault(){
   api("/api/profile/default",{method:"POST",body:JSON.stringify({name})}).then(load).catch(e=>setStatus(e.message));
 }
 function saveSettings(){
-  api("/api/settings",{method:"POST",body:JSON.stringify({terminalChrome:$("chrome").value})}).then(load).catch(e=>setStatus(e.message));
+  api("/api/settings",{method:"POST",body:JSON.stringify({terminalChrome:$("chrome").value,terminalTheme:$("theme").value})}).then(load).catch(e=>setStatus(e.message));
 }
 function generateKey(){
   setStatus("Generating key...");
@@ -243,6 +246,20 @@ std::string json_string(const cJSON* root, const char* key)
 {
     const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, key);
     return cJSON_IsString(item) && item->valuestring != nullptr ? item->valuestring : "";
+}
+
+bool valid_terminal_theme(const std::string& theme)
+{
+    static constexpr const char* kThemes[] = {
+        "adv_dark",       "true_black", "solarized_dark",    "gruvbox_dark", "dracula",
+        "nord",           "tokyo_night", "catppuccin_mocha", "monokai",
+    };
+    for (const char* item : kThemes) {
+        if (theme == item) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void append_uint32(std::vector<unsigned char>& out, uint32_t value)
@@ -528,6 +545,8 @@ std::string WebServer::state_json() const
     cJSON_AddStringToObject(root, "defaultProfile", store_.load_default_ssh_profile().c_str());
     std::string chrome = store_.load_terminal_chrome_mode();
     cJSON_AddStringToObject(root, "terminalChrome", chrome.empty() ? "full" : chrome.c_str());
+    std::string theme = store_.load_terminal_theme();
+    cJSON_AddStringToObject(root, "terminalTheme", theme.empty() ? "adv_dark" : theme.c_str());
     std::string public_key = store_.load_ssh_public_key();
     cJSON_AddStringToObject(root, "publicKey", public_key.c_str());
     cJSON_AddBoolToObject(root, "hasPrivateKey", !store_.load_ssh_private_key().empty());
@@ -708,11 +727,19 @@ esp_err_t WebServer::handle_settings(httpd_req_t* req)
         return send_error(req, 400, "Invalid JSON");
     }
     std::string chrome = json_string(root, "terminalChrome");
+    std::string theme = json_string(root, "terminalTheme");
     cJSON_Delete(root);
     if (chrome != "full" && chrome != "compact" && chrome != "hidden") {
         return send_error(req, 400, "Invalid terminal mode");
     }
+    if (theme.empty()) {
+        theme = "adv_dark";
+    }
+    if (!valid_terminal_theme(theme)) {
+        return send_error(req, 400, "Invalid terminal theme");
+    }
     store_.save_terminal_chrome_mode(chrome);
+    store_.save_terminal_theme(theme);
     return send_json(req, state_json());
 }
 

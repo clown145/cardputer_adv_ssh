@@ -38,6 +38,8 @@ public:
 
     std::string load_terminal_chrome_mode();
     esp_err_t save_terminal_chrome_mode(const std::string& mode);
+    std::string load_terminal_theme();
+    esp_err_t save_terminal_theme(const std::string& theme);
 
     std::string load_ssh_private_key();
     std::string load_ssh_public_key();
