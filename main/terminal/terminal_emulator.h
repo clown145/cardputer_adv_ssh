@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "vterm.h"
+
 namespace adv {
 
 struct TerminalCell {
@@ -22,17 +24,36 @@ struct TerminalCell {
     bool continuation = false;
 };
 
+enum class TerminalInputKey {
+    kEnter,
+    kTab,
+    kBackspace,
+    kEscape,
+    kUp,
+    kDown,
+    kLeft,
+    kRight,
+};
+
 class TerminalEmulator {
 public:
     static constexpr int kCols = 40;
     static constexpr int kRows = 9;
 
     TerminalEmulator(int cols = kCols, int rows = kRows, size_t scrollback_lines = 400);
+    ~TerminalEmulator();
+
+    TerminalEmulator(const TerminalEmulator&) = delete;
+    TerminalEmulator& operator=(const TerminalEmulator&) = delete;
+    TerminalEmulator(TerminalEmulator&&) = delete;
+    TerminalEmulator& operator=(TerminalEmulator&&) = delete;
 
     void reset();
     void resize(int cols, int rows);
     void process(const std::string& bytes);
     std::string take_pending_output();
+    std::string encode_character(char ch);
+    std::string encode_key(TerminalInputKey key);
     void mark_all_dirty();
     void clear_dirty();
 
@@ -50,105 +71,47 @@ public:
     int max_scrollback_offset() const;
 
 private:
-    enum class ParserState {
-        kGround,
-        kEsc,
-        kCsi,
-        kOsc,
-        kOscEsc,
-        kIgnoreOne,
-    };
-
     struct CursorState {
         int row = 0;
         int col = 0;
     };
 
-    std::vector<TerminalCell>& active_cells();
-    const std::vector<TerminalCell>& active_cells() const;
-    TerminalCell& active_cell(int row, int col);
-    const TerminalCell& active_cell(int row, int col) const;
-    size_t cell_index(int row, int col) const;
     std::vector<TerminalCell> blank_line() const;
-    void append_scrollback_line(const std::vector<TerminalCell>& line);
+    void init_vterm();
+    void release_vterm();
+    void append_scrollback_line(int cols, const VTermScreenCell* cells);
+    TerminalCell convert_cell(const VTermScreenCell& cell) const;
     void mark_dirty(int row);
-    void put_char(char ch);
-    void put_codepoint(uint32_t codepoint);
-    void put_glyph(uint32_t codepoint, int width);
-    void handle_utf8_byte(uint8_t ch);
-    void clear_wide_fragment(int row, int col);
-    void line_feed();
-    void reverse_index();
-    void carriage_return();
-    void backspace();
-    void tab();
-    void reset_tab_stops();
-    void set_tab_stop();
-    void clear_tab_stop(int col);
-    void clear_all_tab_stops();
-    int next_tab_stop() const;
-    void scroll_up(int top, int bottom, int count);
-    void scroll_down(int top, int bottom, int count);
-    void clear_cells(int row_start, int col_start, int row_end, int col_end);
-    void clear_line(int mode);
-    void clear_screen(int mode);
-    void set_cursor(int row, int col);
-    void move_cursor(int row_delta, int col_delta);
-    void set_scroll_region(int top, int bottom);
-    void save_cursor();
-    void restore_cursor();
-    void reset_style();
-    void apply_sgr();
-    void apply_mode(bool enabled);
-    void apply_extended_color(bool foreground, size_t& index);
-    void enter_alt_screen(bool save);
-    void leave_alt_screen(bool restore);
-    void clear_active_screen();
-    void append_device_attributes();
-    void append_secondary_device_attributes();
-    void append_cursor_report(bool dec);
-    void handle_escape(uint8_t ch);
-    void handle_charset_select(uint8_t ch);
-    void begin_csi();
-    void collect_csi(uint8_t ch);
-    void dispatch_csi(uint8_t final);
-    int param(size_t index, int fallback) const;
-    bool private_param(int value) const;
+    void mark_dirty_rect(VTermRect rect);
+    void update_cursor(VTermPos pos, bool visible);
+    void update_cursor_from_state();
+    std::string capture_generated_output(size_t before);
+
+    static void output_callback(const char* bytes, size_t len, void* user);
+    static int damage_callback(VTermRect rect, void* user);
+    static int moverect_callback(VTermRect dest, VTermRect src, void* user);
+    static int movecursor_callback(VTermPos pos, VTermPos oldpos, int visible, void* user);
+    static int settermprop_callback(VTermProp prop, VTermValue* value, void* user);
+    static int bell_callback(void* user);
+    static int resize_callback(int rows, int cols, void* user);
+    static int sb_pushline_callback(int cols, const VTermScreenCell* cells, void* user);
+    static int sb_popline_callback(int cols, VTermScreenCell* cells, void* user);
+    static int sb_clear_callback(void* user);
+    static int sb_pushline4_callback(int cols, const VTermScreenCell* cells, bool continuation, void* user);
 
     int cols_ = kCols;
     int rows_ = kRows;
     size_t max_scrollback_lines_ = 400;
-    std::vector<TerminalCell> main_cells_;
-    std::vector<TerminalCell> alt_cells_;
     std::vector<bool> dirty_;
     std::vector<std::vector<TerminalCell>> scrollback_;
-    std::vector<bool> tab_stops_;
-    bool alt_active_ = false;
-    ParserState state_ = ParserState::kGround;
     CursorState cursor_;
-    CursorState saved_cursor_;
-    CursorState saved_main_cursor_;
-    int scroll_top_ = 0;
-    int scroll_bottom_ = kRows - 1;
     bool cursor_visible_ = true;
-    bool auto_wrap_ = true;
-    bool wrap_pending_ = false;
-    bool origin_mode_ = false;
-    bool insert_mode_ = false;
-    bool selecting_charset_ = false;
-    bool dec_graphics_ = false;
-    bool saved_dec_graphics_ = false;
-    bool application_cursor_mode_ = false;
-    uint32_t last_printed_codepoint_ = ' ';
-    int last_printed_width_ = 1;
-    TerminalCell style_;
+    bool alt_active_ = false;
     std::string pending_output_;
-    uint32_t utf8_codepoint_ = 0;
-    uint8_t utf8_remaining_ = 0;
-    uint8_t utf8_expected_ = 0;
-    std::vector<int> csi_params_;
-    int csi_current_ = -1;
-    char csi_private_ = '\0';
+    mutable TerminalCell scratch_cell_;
+    VTerm* vt_ = nullptr;
+    VTermState* state_ = nullptr;
+    VTermScreen* screen_ = nullptr;
 };
 
 }  // namespace adv

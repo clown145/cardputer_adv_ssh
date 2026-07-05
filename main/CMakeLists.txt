@@ -23,4 +23,5 @@ idf_component_register(
         driver
         M5Unified
         libssh2_esp
+        libvterm
 )

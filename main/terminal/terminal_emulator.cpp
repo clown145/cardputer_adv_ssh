@@ -1,6 +1,7 @@
 #include "terminal/terminal_emulator.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace adv {
 namespace {
@@ -56,86 +57,44 @@ uint8_t ansi256_to_ansi(uint8_t color)
     return rgb_to_ansi(expand(r), expand(g), expand(b));
 }
 
-bool is_combining(uint32_t codepoint)
+uint8_t vterm_color_to_ansi(VTermColor color, bool foreground)
 {
-    return (codepoint >= 0x0300 && codepoint <= 0x036F) || (codepoint >= 0x1AB0 && codepoint <= 0x1AFF) ||
-           (codepoint >= 0x1DC0 && codepoint <= 0x1DFF) || (codepoint >= 0x20D0 && codepoint <= 0x20FF) ||
-           (codepoint >= 0xFE20 && codepoint <= 0xFE2F);
-}
-
-int codepoint_width(uint32_t codepoint)
-{
-    if (is_combining(codepoint)) {
+    if (foreground && VTERM_COLOR_IS_DEFAULT_FG(&color)) {
+        return 7;
+    }
+    if (!foreground && VTERM_COLOR_IS_DEFAULT_BG(&color)) {
         return 0;
     }
-    if ((codepoint >= 0x1100 && codepoint <= 0x115F) || (codepoint >= 0x2E80 && codepoint <= 0xA4CF) ||
-        (codepoint >= 0xAC00 && codepoint <= 0xD7A3) || (codepoint >= 0xF900 && codepoint <= 0xFAFF) ||
-        (codepoint >= 0x20000 && codepoint <= 0x3FFFD) ||
-        (codepoint >= 0xFE10 && codepoint <= 0xFE19) || (codepoint >= 0xFE30 && codepoint <= 0xFE6F) ||
-        (codepoint >= 0xFF00 && codepoint <= 0xFF60) || (codepoint >= 0xFFE0 && codepoint <= 0xFFE6)) {
-        return 2;
+    if (VTERM_COLOR_IS_INDEXED(&color)) {
+        return ansi256_to_ansi(color.indexed.idx);
     }
-    return 1;
+    if (VTERM_COLOR_IS_RGB(&color)) {
+        return rgb_to_ansi(color.rgb.red, color.rgb.green, color.rgb.blue);
+    }
+    return foreground ? 7 : 0;
 }
 
-char fallback_for_codepoint(uint32_t codepoint)
+VTermKey to_vterm_key(TerminalInputKey key)
 {
-    switch (codepoint) {
-        case 0x2500:
-        case 0x2501:
-        case 0x2550:
-            return '-';
-        case 0x2502:
-        case 0x2503:
-        case 0x2551:
-            return '|';
-        case 0x250C:
-        case 0x2510:
-        case 0x2514:
-        case 0x2518:
-        case 0x251C:
-        case 0x2524:
-        case 0x252C:
-        case 0x2534:
-        case 0x253C:
-        case 0x2554:
-        case 0x2557:
-        case 0x255A:
-        case 0x255D:
-        case 0x256C:
-            return '+';
-        case 0x2588:
-        case 0x2593:
-        case 0x25A0:
-            return '#';
-        case 0x2591:
-        case 0x2592:
-            return '.';
-        case 0x2190:
-            return '<';
-        case 0x2191:
-            return '^';
-        case 0x2192:
-            return '>';
-        case 0x2193:
-            return 'v';
-        case 0x2022:
-        case 0x00B7:
-            return '*';
-        default:
-            return codepoint < 128 ? static_cast<char>(codepoint) : '?';
+    switch (key) {
+        case TerminalInputKey::kEnter:
+            return VTERM_KEY_ENTER;
+        case TerminalInputKey::kTab:
+            return VTERM_KEY_TAB;
+        case TerminalInputKey::kBackspace:
+            return VTERM_KEY_BACKSPACE;
+        case TerminalInputKey::kEscape:
+            return VTERM_KEY_ESCAPE;
+        case TerminalInputKey::kUp:
+            return VTERM_KEY_UP;
+        case TerminalInputKey::kDown:
+            return VTERM_KEY_DOWN;
+        case TerminalInputKey::kLeft:
+            return VTERM_KEY_LEFT;
+        case TerminalInputKey::kRight:
+            return VTERM_KEY_RIGHT;
     }
-}
-
-uint32_t drawable_codepoint(uint32_t codepoint, int width)
-{
-    if (codepoint < 128) {
-        return codepoint;
-    }
-    if (width == 2 && codepoint <= 0xFFFF) {
-        return codepoint;
-    }
-    return static_cast<uint8_t>(fallback_for_codepoint(codepoint));
+    return VTERM_KEY_NONE;
 }
 }  // namespace
 
@@ -143,45 +102,27 @@ TerminalEmulator::TerminalEmulator(int cols, int rows, size_t scrollback_lines)
     : cols_(clamp_int(cols, 8, 80)),
       rows_(clamp_int(rows, 4, 24)),
       max_scrollback_lines_(scrollback_lines),
-      main_cells_(rows_ * cols_),
-      alt_cells_(rows_ * cols_),
-      dirty_(rows_, true),
-      tab_stops_(cols_, false)
+      dirty_(rows_, true)
 {
-    reset_style();
-    scroll_bottom_ = rows_ - 1;
-    reset_tab_stops();
+    init_vterm();
+}
+
+TerminalEmulator::~TerminalEmulator()
+{
+    release_vterm();
 }
 
 void TerminalEmulator::reset()
 {
-    std::fill(main_cells_.begin(), main_cells_.end(), kBlank);
-    std::fill(alt_cells_.begin(), alt_cells_.end(), kBlank);
     scrollback_.clear();
-    alt_active_ = false;
-    state_ = ParserState::kGround;
-    cursor_ = {};
-    saved_cursor_ = {};
-    saved_main_cursor_ = {};
-    scroll_top_ = 0;
-    scroll_bottom_ = rows_ - 1;
-    cursor_visible_ = true;
-    auto_wrap_ = true;
-    wrap_pending_ = false;
-    origin_mode_ = false;
-    insert_mode_ = false;
-    selecting_charset_ = false;
-    dec_graphics_ = false;
-    saved_dec_graphics_ = false;
-    application_cursor_mode_ = false;
-    last_printed_codepoint_ = ' ';
-    last_printed_width_ = 1;
     pending_output_.clear();
-    utf8_codepoint_ = 0;
-    utf8_remaining_ = 0;
-    utf8_expected_ = 0;
-    reset_tab_stops();
-    reset_style();
+    alt_active_ = false;
+    cursor_visible_ = true;
+    cursor_ = {};
+    if (screen_ != nullptr) {
+        vterm_screen_reset(screen_, 1);
+    }
+    update_cursor_from_state();
     mark_all_dirty();
 }
 
@@ -193,87 +134,54 @@ void TerminalEmulator::resize(int cols, int rows)
         return;
     }
 
-    auto resize_cells = [&](const std::vector<TerminalCell>& old_cells) {
-        std::vector<TerminalCell> next(rows * cols, kBlank);
-        int copy_rows = std::min(rows_, rows);
-        int copy_cols = std::min(cols_, cols);
-        for (int row = 0; row < copy_rows; ++row) {
-            for (int col = 0; col < copy_cols; ++col) {
-                next[row * cols + col] = old_cells[row * cols_ + col];
-            }
-        }
-        return next;
-    };
-
-    main_cells_ = resize_cells(main_cells_);
-    alt_cells_ = resize_cells(alt_cells_);
     cols_ = cols;
     rows_ = rows;
     dirty_.assign(rows_, true);
-    tab_stops_.assign(cols_, false);
-    reset_tab_stops();
-    scroll_top_ = 0;
-    scroll_bottom_ = rows_ - 1;
-    set_cursor(std::min(cursor_.row, rows_ - 1), std::min(cursor_.col, cols_ - 1));
-    saved_cursor_.row = clamp_int(saved_cursor_.row, 0, rows_ - 1);
-    saved_cursor_.col = clamp_int(saved_cursor_.col, 0, cols_ - 1);
-    saved_main_cursor_.row = clamp_int(saved_main_cursor_.row, 0, rows_ - 1);
-    saved_main_cursor_.col = clamp_int(saved_main_cursor_.col, 0, cols_ - 1);
-
     for (auto& line : scrollback_) {
         line.resize(cols_, kBlank);
     }
+    if (vt_ != nullptr) {
+        vterm_set_size(vt_, rows_, cols_);
+    }
+    update_cursor_from_state();
+    mark_all_dirty();
 }
 
 void TerminalEmulator::process(const std::string& bytes)
 {
-    for (uint8_t ch : bytes) {
-        switch (state_) {
-            case ParserState::kGround:
-                if (ch == 0x1B) {
-                    state_ = ParserState::kEsc;
-                } else if (ch == 0x9B) {
-                    begin_csi();
-                } else if (ch == 0x90 || ch == 0x9D || ch == 0x9E || ch == 0x9F) {
-                    state_ = ParserState::kOsc;
-                } else if (ch == 0x0E || ch == 0x0F) {
-                    // Shift-out/shift-in selects alternate character sets on VT terminals.
-                    // We render ASCII only, so the state change is intentionally ignored.
-                } else if (ch == '\r') {
-                    carriage_return();
-                } else if (ch == '\n') {
-                    line_feed();
-                } else if (ch == '\b' || ch == 0x7F) {
-                    backspace();
-                } else if (ch == '\t') {
-                    tab();
-                } else if (ch >= 32 && ch <= 126) {
-                    put_char(static_cast<char>(ch));
-                } else if (ch >= 0x80) {
-                    handle_utf8_byte(ch);
-                }
-                break;
-            case ParserState::kEsc:
-                handle_escape(ch);
-                break;
-            case ParserState::kCsi:
-                collect_csi(ch);
-                break;
-            case ParserState::kOsc:
-                if (ch == 0x07) {
-                    state_ = ParserState::kGround;
-                } else if (ch == 0x1B) {
-                    state_ = ParserState::kOscEsc;
-                }
-                break;
-            case ParserState::kOscEsc:
-                state_ = ch == '\\' ? ParserState::kGround : ParserState::kOsc;
-                break;
-            case ParserState::kIgnoreOne:
-                state_ = ParserState::kGround;
-                break;
-        }
+    if (vt_ == nullptr || screen_ == nullptr || bytes.empty()) {
+        return;
     }
+    vterm_input_write(vt_, bytes.data(), bytes.size());
+    vterm_screen_flush_damage(screen_);
+    update_cursor_from_state();
+}
+
+std::string TerminalEmulator::take_pending_output()
+{
+    std::string out;
+    out.swap(pending_output_);
+    return out;
+}
+
+std::string TerminalEmulator::encode_character(char ch)
+{
+    if (ch < 32 || ch == 0x7F || vt_ == nullptr) {
+        return std::string(1, ch);
+    }
+    size_t before = pending_output_.size();
+    vterm_keyboard_unichar(vt_, static_cast<unsigned char>(ch), VTERM_MOD_NONE);
+    return capture_generated_output(before);
+}
+
+std::string TerminalEmulator::encode_key(TerminalInputKey key)
+{
+    if (vt_ == nullptr) {
+        return {};
+    }
+    size_t before = pending_output_.size();
+    vterm_keyboard_key(vt_, to_vterm_key(key), VTERM_MOD_NONE);
+    return capture_generated_output(before);
 }
 
 void TerminalEmulator::mark_all_dirty()
@@ -286,26 +194,32 @@ void TerminalEmulator::clear_dirty()
     std::fill(dirty_.begin(), dirty_.end(), false);
 }
 
-std::string TerminalEmulator::take_pending_output()
-{
-    std::string out;
-    out.swap(pending_output_);
-    return out;
-}
-
 const TerminalCell& TerminalEmulator::cell(int row, int col) const
 {
-    return active_cells()[cell_index(row, col)];
+    scratch_cell_ = kBlank;
+    if (screen_ == nullptr || row < 0 || row >= rows_ || col < 0 || col >= cols_) {
+        return scratch_cell_;
+    }
+    VTermScreenCell cell = {};
+    VTermPos pos{row, col};
+    if (vterm_screen_get_cell(screen_, pos, &cell)) {
+        scratch_cell_ = convert_cell(cell);
+    }
+    return scratch_cell_;
 }
 
 std::vector<TerminalCell> TerminalEmulator::line(int row) const
 {
     std::vector<TerminalCell> out(cols_, kBlank);
-    if (row < 0 || row >= rows_) {
+    if (screen_ == nullptr || row < 0 || row >= rows_) {
         return out;
     }
     for (int col = 0; col < cols_; ++col) {
-        out[col] = active_cell(row, col);
+        VTermScreenCell cell = {};
+        VTermPos pos{row, col};
+        if (vterm_screen_get_cell(screen_, pos, &cell)) {
+            out[col] = convert_cell(cell);
+        }
     }
     return out;
 }
@@ -368,7 +282,7 @@ bool TerminalEmulator::cursor_visible() const
 
 bool TerminalEmulator::application_cursor_mode() const
 {
-    return application_cursor_mode_;
+    return false;
 }
 
 int TerminalEmulator::scrollback_size() const
@@ -381,47 +295,99 @@ int TerminalEmulator::max_scrollback_offset() const
     return static_cast<int>(scrollback_.size());
 }
 
-std::vector<TerminalCell>& TerminalEmulator::active_cells()
-{
-    return alt_active_ ? alt_cells_ : main_cells_;
-}
-
-const std::vector<TerminalCell>& TerminalEmulator::active_cells() const
-{
-    return alt_active_ ? alt_cells_ : main_cells_;
-}
-
-TerminalCell& TerminalEmulator::active_cell(int row, int col)
-{
-    return active_cells()[cell_index(row, col)];
-}
-
-const TerminalCell& TerminalEmulator::active_cell(int row, int col) const
-{
-    return active_cells()[cell_index(row, col)];
-}
-
-size_t TerminalEmulator::cell_index(int row, int col) const
-{
-    return static_cast<size_t>(row * cols_ + col);
-}
-
 std::vector<TerminalCell> TerminalEmulator::blank_line() const
 {
     return std::vector<TerminalCell>(cols_, kBlank);
 }
 
-void TerminalEmulator::append_scrollback_line(const std::vector<TerminalCell>& line)
+void TerminalEmulator::init_vterm()
 {
-    if (max_scrollback_lines_ == 0 || alt_active_) {
+    struct VTermBuilder builder = {};
+    builder.rows = rows_;
+    builder.cols = cols_;
+    builder.outbuffer_len = 1024;
+    builder.tmpbuffer_len = 1024;
+    vt_ = vterm_build(&builder);
+    if (vt_ == nullptr) {
         return;
     }
-    std::vector<TerminalCell> normalized = line;
-    normalized.resize(cols_, kBlank);
-    scrollback_.push_back(normalized);
+
+    vterm_set_utf8(vt_, 1);
+    vterm_output_set_callback(vt_, &TerminalEmulator::output_callback, this);
+    state_ = vterm_obtain_state(vt_);
+    screen_ = vterm_obtain_screen(vt_);
+    if (screen_ == nullptr) {
+        return;
+    }
+
+    static const VTermScreenCallbacks callbacks = {
+        &TerminalEmulator::damage_callback,
+        &TerminalEmulator::moverect_callback,
+        &TerminalEmulator::movecursor_callback,
+        &TerminalEmulator::settermprop_callback,
+        &TerminalEmulator::bell_callback,
+        &TerminalEmulator::resize_callback,
+        &TerminalEmulator::sb_pushline_callback,
+        &TerminalEmulator::sb_popline_callback,
+        &TerminalEmulator::sb_clear_callback,
+        &TerminalEmulator::sb_pushline4_callback,
+    };
+    vterm_screen_set_callbacks(screen_, &callbacks, this);
+    vterm_screen_callbacks_has_pushline4(screen_);
+    vterm_screen_enable_altscreen(screen_, 1);
+    vterm_screen_set_damage_merge(screen_, VTERM_DAMAGE_ROW);
+    vterm_screen_reset(screen_, 1);
+    update_cursor_from_state();
+    mark_all_dirty();
+}
+
+void TerminalEmulator::release_vterm()
+{
+    if (vt_ != nullptr) {
+        vterm_free(vt_);
+    }
+    vt_ = nullptr;
+    state_ = nullptr;
+    screen_ = nullptr;
+}
+
+void TerminalEmulator::append_scrollback_line(int cols, const VTermScreenCell* cells)
+{
+    if (max_scrollback_lines_ == 0 || cells == nullptr || alt_active_) {
+        return;
+    }
+    std::vector<TerminalCell> line(cols_, kBlank);
+    int limit = std::min(cols, cols_);
+    for (int col = 0; col < limit; ++col) {
+        line[col] = convert_cell(cells[col]);
+    }
+    scrollback_.push_back(line);
     if (scrollback_.size() > max_scrollback_lines_) {
         scrollback_.erase(scrollback_.begin(), scrollback_.begin() + (scrollback_.size() - max_scrollback_lines_));
     }
+}
+
+TerminalCell TerminalEmulator::convert_cell(const VTermScreenCell& source) const
+{
+    TerminalCell cell{};
+    if (source.chars[0] == static_cast<uint32_t>(-1)) {
+        cell.width = 0;
+        cell.continuation = true;
+        return cell;
+    }
+
+    uint32_t codepoint = source.chars[0] == 0 ? ' ' : source.chars[0];
+    cell.codepoint = codepoint;
+    cell.ch = codepoint < 128 ? static_cast<char>(codepoint) : '?';
+    cell.width = std::max<char>(1, source.width);
+    cell.bold = source.attrs.bold;
+    cell.inverse = source.attrs.reverse;
+    cell.underline = source.attrs.underline != VTERM_UNDERLINE_OFF;
+    cell.hidden = source.attrs.conceal;
+    cell.strikethrough = source.attrs.strike;
+    cell.fg = vterm_color_to_ansi(source.fg, true);
+    cell.bg = vterm_color_to_ansi(source.bg, false);
+    return cell;
 }
 
 void TerminalEmulator::mark_dirty(int row)
@@ -431,793 +397,139 @@ void TerminalEmulator::mark_dirty(int row)
     }
 }
 
-void TerminalEmulator::put_char(char ch)
+void TerminalEmulator::mark_dirty_rect(VTermRect rect)
 {
-    if (dec_graphics_) {
-        switch (ch) {
-            case 'j':
-            case 'k':
-            case 'l':
-            case 'm':
-            case 'n':
-            case 't':
-            case 'u':
-            case 'v':
-            case 'w':
-                ch = '+';
-                break;
-            case 'q':
-                ch = '-';
-                break;
-            case 'x':
-                ch = '|';
-                break;
-            case '`':
-            case 'a':
-                ch = '.';
-                break;
-            default:
-                break;
-        }
+    int first = clamp_int(rect.start_row, 0, rows_ - 1);
+    int last = clamp_int(rect.end_row - 1, 0, rows_ - 1);
+    for (int row = first; row <= last; ++row) {
+        mark_dirty(row);
     }
-    put_glyph(ch, 1);
 }
 
-void TerminalEmulator::put_codepoint(uint32_t codepoint)
+void TerminalEmulator::update_cursor(VTermPos pos, bool visible)
 {
-    int width = codepoint_width(codepoint);
-    if (width == 0) {
-        return;
-    }
-    put_glyph(drawable_codepoint(codepoint, width), width);
-}
-
-void TerminalEmulator::put_glyph(uint32_t codepoint, int width)
-{
-    width = clamp_int(width, 1, 2);
-    if (wrap_pending_) {
-        cursor_.col = 0;
-        line_feed();
-        wrap_pending_ = false;
-    }
-    if (width == 2 && cursor_.col == cols_ - 1) {
-        cursor_.col = 0;
-        line_feed();
-    }
-    if (insert_mode_) {
-        for (int col = cols_ - 1; col >= cursor_.col + width; --col) {
-            active_cell(cursor_.row, col) = active_cell(cursor_.row, col - width);
-        }
-    }
-    for (int col = cursor_.col; col < cursor_.col + width && col < cols_; ++col) {
-        clear_wide_fragment(cursor_.row, col);
-    }
-    active_cell(cursor_.row, cursor_.col) = style_;
-    active_cell(cursor_.row, cursor_.col).codepoint = codepoint;
-    active_cell(cursor_.row, cursor_.col).ch = codepoint < 128 ? static_cast<char>(codepoint) : '?';
-    active_cell(cursor_.row, cursor_.col).width = width;
-    active_cell(cursor_.row, cursor_.col).continuation = false;
-    last_printed_codepoint_ = codepoint;
-    last_printed_width_ = width;
-    if (width == 2 && cursor_.col + 1 < cols_) {
-        active_cell(cursor_.row, cursor_.col + 1) = style_;
-        active_cell(cursor_.row, cursor_.col + 1).codepoint = ' ';
-        active_cell(cursor_.row, cursor_.col + 1).ch = ' ';
-        active_cell(cursor_.row, cursor_.col + 1).width = 0;
-        active_cell(cursor_.row, cursor_.col + 1).continuation = true;
-    }
+    int old_row = cursor_.row;
+    cursor_.row = clamp_int(pos.row, 0, rows_ - 1);
+    cursor_.col = clamp_int(pos.col, 0, cols_ - 1);
+    cursor_visible_ = visible;
+    mark_dirty(old_row);
     mark_dirty(cursor_.row);
-    if (cursor_.col + width >= cols_) {
-        cursor_.col = cols_ - 1;
-        wrap_pending_ = auto_wrap_;
-    } else {
-        cursor_.col += width;
-    }
 }
 
-void TerminalEmulator::clear_wide_fragment(int row, int col)
+void TerminalEmulator::update_cursor_from_state()
 {
-    if (row < 0 || row >= rows_ || col < 0 || col >= cols_) {
+    if (state_ == nullptr) {
         return;
     }
-    TerminalCell& cell = active_cell(row, col);
-    if (cell.continuation && col > 0) {
-        active_cell(row, col - 1) = kBlank;
-    } else if (!cell.continuation && cell.width == 2 && col + 1 < cols_) {
-        active_cell(row, col + 1) = kBlank;
-    }
-    cell = kBlank;
+    VTermPos pos{};
+    vterm_state_get_cursorpos(state_, &pos);
+    update_cursor(pos, cursor_visible_);
 }
 
-void TerminalEmulator::handle_utf8_byte(uint8_t ch)
+std::string TerminalEmulator::capture_generated_output(size_t before)
 {
-    if (utf8_remaining_ == 0) {
-        if ((ch & 0xE0) == 0xC0) {
-            utf8_codepoint_ = ch & 0x1F;
-            utf8_remaining_ = 1;
-            utf8_expected_ = 1;
-        } else if ((ch & 0xF0) == 0xE0) {
-            utf8_codepoint_ = ch & 0x0F;
-            utf8_remaining_ = 2;
-            utf8_expected_ = 2;
-        } else if ((ch & 0xF8) == 0xF0) {
-            utf8_codepoint_ = ch & 0x07;
-            utf8_remaining_ = 3;
-            utf8_expected_ = 3;
-        } else {
-            put_glyph('?', 1);
-        }
-        return;
+    if (before > pending_output_.size()) {
+        return {};
     }
+    std::string out = pending_output_.substr(before);
+    pending_output_.resize(before);
+    return out;
+}
 
-    if ((ch & 0xC0) != 0x80) {
-        utf8_remaining_ = 0;
-        utf8_expected_ = 0;
-        put_glyph('?', 1);
-        handle_utf8_byte(ch);
-        return;
-    }
-    utf8_codepoint_ = (utf8_codepoint_ << 6) | (ch & 0x3F);
-    --utf8_remaining_;
-    if (utf8_remaining_ == 0) {
-        uint32_t min_value = utf8_expected_ == 1 ? 0x80 : (utf8_expected_ == 2 ? 0x800 : 0x10000);
-        if (utf8_codepoint_ < min_value || utf8_codepoint_ > 0x10FFFF ||
-            (utf8_codepoint_ >= 0xD800 && utf8_codepoint_ <= 0xDFFF)) {
-            put_glyph('?', 1);
-        } else {
-            put_codepoint(utf8_codepoint_);
-        }
-        utf8_codepoint_ = 0;
-        utf8_expected_ = 0;
+void TerminalEmulator::output_callback(const char* bytes, size_t len, void* user)
+{
+    auto* terminal = static_cast<TerminalEmulator*>(user);
+    if (terminal != nullptr && bytes != nullptr && len > 0) {
+        terminal->pending_output_.append(bytes, bytes + len);
     }
 }
 
-void TerminalEmulator::line_feed()
+int TerminalEmulator::damage_callback(VTermRect rect, void* user)
 {
-    if (cursor_.row == scroll_bottom_) {
-        scroll_up(scroll_top_, scroll_bottom_, 1);
-    } else if (cursor_.row < rows_ - 1) {
-        ++cursor_.row;
-    }
+    static_cast<TerminalEmulator*>(user)->mark_dirty_rect(rect);
+    return 1;
 }
 
-void TerminalEmulator::reverse_index()
+int TerminalEmulator::moverect_callback(VTermRect dest, VTermRect src, void* user)
 {
-    if (cursor_.row == scroll_top_) {
-        scroll_down(scroll_top_, scroll_bottom_, 1);
-    } else if (cursor_.row > 0) {
-        --cursor_.row;
-    }
+    auto* terminal = static_cast<TerminalEmulator*>(user);
+    terminal->mark_dirty_rect(src);
+    terminal->mark_dirty_rect(dest);
+    return 1;
 }
 
-void TerminalEmulator::carriage_return()
+int TerminalEmulator::movecursor_callback(VTermPos pos, VTermPos oldpos, int visible, void* user)
 {
-    cursor_.col = 0;
-    wrap_pending_ = false;
+    auto* terminal = static_cast<TerminalEmulator*>(user);
+    terminal->mark_dirty(oldpos.row);
+    terminal->update_cursor(pos, visible != 0);
+    return 1;
 }
 
-void TerminalEmulator::backspace()
+int TerminalEmulator::settermprop_callback(VTermProp prop, VTermValue* value, void* user)
 {
-    wrap_pending_ = false;
-    if (cursor_.col > 0) {
-        --cursor_.col;
+    auto* terminal = static_cast<TerminalEmulator*>(user);
+    if (terminal == nullptr || value == nullptr) {
+        return 0;
     }
-}
-
-void TerminalEmulator::tab()
-{
-    wrap_pending_ = false;
-    cursor_.col = next_tab_stop();
-}
-
-void TerminalEmulator::reset_tab_stops()
-{
-    if (tab_stops_.size() != static_cast<size_t>(cols_)) {
-        tab_stops_.assign(cols_, false);
-    } else {
-        std::fill(tab_stops_.begin(), tab_stops_.end(), false);
-    }
-    for (int col = 8; col < cols_; col += 8) {
-        tab_stops_[col] = true;
-    }
-}
-
-void TerminalEmulator::set_tab_stop()
-{
-    if (cursor_.col >= 0 && cursor_.col < cols_) {
-        tab_stops_[cursor_.col] = true;
-    }
-}
-
-void TerminalEmulator::clear_tab_stop(int col)
-{
-    if (col >= 0 && col < cols_) {
-        tab_stops_[col] = false;
-    }
-}
-
-void TerminalEmulator::clear_all_tab_stops()
-{
-    std::fill(tab_stops_.begin(), tab_stops_.end(), false);
-}
-
-int TerminalEmulator::next_tab_stop() const
-{
-    for (int col = cursor_.col + 1; col < cols_; ++col) {
-        if (tab_stops_[col]) {
-            return col;
-        }
-    }
-    return cols_ - 1;
-}
-
-void TerminalEmulator::scroll_up(int top, int bottom, int count)
-{
-    top = clamp_int(top, 0, rows_ - 1);
-    bottom = clamp_int(bottom, top, rows_ - 1);
-    count = clamp_int(count, 1, bottom - top + 1);
-    auto& cells = active_cells();
-    if (!alt_active_ && top == 0 && bottom == rows_ - 1) {
-        for (int row = 0; row < count; ++row) {
-            std::vector<TerminalCell> pushed(cols_, kBlank);
-            for (int col = 0; col < cols_; ++col) {
-                pushed[col] = cells[row * cols_ + col];
-            }
-            append_scrollback_line(pushed);
-        }
-    }
-    for (int row = top; row <= bottom - count; ++row) {
-        for (int col = 0; col < cols_; ++col) {
-            cells[row * cols_ + col] = cells[(row + count) * cols_ + col];
-        }
-        mark_dirty(row);
-    }
-    for (int row = bottom - count + 1; row <= bottom; ++row) {
-        for (int col = 0; col < cols_; ++col) {
-            cells[row * cols_ + col] = kBlank;
-        }
-        mark_dirty(row);
-    }
-}
-
-void TerminalEmulator::scroll_down(int top, int bottom, int count)
-{
-    top = clamp_int(top, 0, rows_ - 1);
-    bottom = clamp_int(bottom, top, rows_ - 1);
-    count = clamp_int(count, 1, bottom - top + 1);
-    auto& cells = active_cells();
-    for (int row = bottom; row >= top + count; --row) {
-        for (int col = 0; col < cols_; ++col) {
-            cells[row * cols_ + col] = cells[(row - count) * cols_ + col];
-        }
-        mark_dirty(row);
-    }
-    for (int row = top; row < top + count; ++row) {
-        for (int col = 0; col < cols_; ++col) {
-            cells[row * cols_ + col] = kBlank;
-        }
-        mark_dirty(row);
-    }
-}
-
-void TerminalEmulator::clear_cells(int row_start, int col_start, int row_end, int col_end)
-{
-    row_start = clamp_int(row_start, 0, rows_ - 1);
-    row_end = clamp_int(row_end, 0, rows_ - 1);
-    col_start = clamp_int(col_start, 0, cols_ - 1);
-    col_end = clamp_int(col_end, 0, cols_ - 1);
-    if (row_start > row_end) {
-        std::swap(row_start, row_end);
-    }
-    for (int row = row_start; row <= row_end; ++row) {
-        int first = row == row_start ? col_start : 0;
-        int last = row == row_end ? col_end : cols_ - 1;
-        for (int col = first; col <= last; ++col) {
-            clear_wide_fragment(row, col);
-        }
-        mark_dirty(row);
-    }
-}
-
-void TerminalEmulator::clear_line(int mode)
-{
-    if (mode == 1) {
-        clear_cells(cursor_.row, 0, cursor_.row, cursor_.col);
-    } else if (mode == 2) {
-        clear_cells(cursor_.row, 0, cursor_.row, cols_ - 1);
-    } else {
-        clear_cells(cursor_.row, cursor_.col, cursor_.row, cols_ - 1);
-    }
-}
-
-void TerminalEmulator::clear_screen(int mode)
-{
-    if (mode == 1) {
-        clear_cells(0, 0, cursor_.row, cursor_.col);
-    } else if (mode == 2 || mode == 3) {
-        clear_cells(0, 0, rows_ - 1, cols_ - 1);
-    } else {
-        clear_cells(cursor_.row, cursor_.col, rows_ - 1, cols_ - 1);
-    }
-}
-
-void TerminalEmulator::set_cursor(int row, int col)
-{
-    wrap_pending_ = false;
-    cursor_.row = clamp_int(row, 0, rows_ - 1);
-    cursor_.col = clamp_int(col, 0, cols_ - 1);
-}
-
-void TerminalEmulator::move_cursor(int row_delta, int col_delta)
-{
-    wrap_pending_ = false;
-    set_cursor(cursor_.row + row_delta, cursor_.col + col_delta);
-}
-
-void TerminalEmulator::set_scroll_region(int top, int bottom)
-{
-    if (top >= 0 && bottom > top && bottom < rows_) {
-        scroll_top_ = top;
-        scroll_bottom_ = bottom;
-    } else {
-        scroll_top_ = 0;
-        scroll_bottom_ = rows_ - 1;
-    }
-    set_cursor(0, 0);
-}
-
-void TerminalEmulator::save_cursor()
-{
-    saved_cursor_ = cursor_;
-    saved_dec_graphics_ = dec_graphics_;
-}
-
-void TerminalEmulator::restore_cursor()
-{
-    set_cursor(saved_cursor_.row, saved_cursor_.col);
-    dec_graphics_ = saved_dec_graphics_;
-}
-
-void TerminalEmulator::reset_style()
-{
-    style_ = kBlank;
-}
-
-void TerminalEmulator::apply_sgr()
-{
-    if (csi_params_.empty()) {
-        reset_style();
-        return;
-    }
-    for (size_t i = 0; i < csi_params_.size(); ++i) {
-        int value = csi_params_[i] < 0 ? 0 : csi_params_[i];
-        if (value == 0) {
-            reset_style();
-        } else if (value == 2) {
-            style_.dim = true;
-        } else if (value == 3) {
-            // Italic has no separate LCD rendering on the built-in fonts.
-        } else if (value == 1) {
-            style_.bold = true;
-        } else if (value == 4) {
-            style_.underline = true;
-        } else if (value == 8) {
-            style_.hidden = true;
-        } else if (value == 9) {
-            style_.strikethrough = true;
-        } else if (value == 22) {
-            style_.bold = false;
-            style_.dim = false;
-        } else if (value == 23) {
-            // Italic reset.
-        } else if (value == 24) {
-            style_.underline = false;
-        } else if (value == 28) {
-            style_.hidden = false;
-        } else if (value == 29) {
-            style_.strikethrough = false;
-        } else if (value == 7) {
-            style_.inverse = true;
-        } else if (value == 27) {
-            style_.inverse = false;
-        } else if (value >= 30 && value <= 37) {
-            style_.fg = value - 30;
-        } else if (value >= 40 && value <= 47) {
-            style_.bg = value - 40;
-        } else if (value == 38) {
-            apply_extended_color(true, i);
-        } else if (value == 48) {
-            apply_extended_color(false, i);
-        } else if (value >= 90 && value <= 97) {
-            style_.fg = value - 90 + 8;
-        } else if (value >= 100 && value <= 107) {
-            style_.bg = value - 100 + 8;
-        } else if (value == 39) {
-            style_.fg = 7;
-        } else if (value == 49) {
-            style_.bg = 0;
-        }
-    }
-}
-
-void TerminalEmulator::apply_extended_color(bool foreground, size_t& index)
-{
-    if (index + 1 >= csi_params_.size()) {
-        return;
-    }
-    int mode = csi_params_[index + 1];
-    uint8_t color = foreground ? style_.fg : style_.bg;
-    if (mode == 5 && index + 2 < csi_params_.size()) {
-        int value = csi_params_[index + 2];
-        if (value >= 0 && value <= 255) {
-            color = ansi256_to_ansi(static_cast<uint8_t>(value));
-        }
-        index += 2;
-    } else if (mode == 2 && index + 4 < csi_params_.size()) {
-        int r = clamp_int(csi_params_[index + 2], 0, 255);
-        int g = clamp_int(csi_params_[index + 3], 0, 255);
-        int b = clamp_int(csi_params_[index + 4], 0, 255);
-        color = rgb_to_ansi(static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b));
-        index += 4;
-    }
-    if (foreground) {
-        style_.fg = color;
-    } else {
-        style_.bg = color;
-    }
-}
-
-void TerminalEmulator::apply_mode(bool enabled)
-{
-    if (csi_private_ == '?') {
-        if (private_param(1)) {
-            application_cursor_mode_ = enabled;
-        }
-        if (private_param(25)) {
-            cursor_visible_ = enabled;
-            mark_dirty(cursor_.row);
-        }
-        if (private_param(6)) {
-            origin_mode_ = enabled;
-            set_cursor(0, 0);
-        }
-        if (private_param(7)) {
-            auto_wrap_ = enabled;
-            if (!enabled) {
-                wrap_pending_ = false;
-            }
-        }
-        // Bracketed paste, focus events, and mouse reporting are accepted as
-        // no-ops. This firmware has no paste buffer or pointer input.
-        if (enabled) {
-            if (private_param(47) || private_param(1047)) {
-                enter_alt_screen(false);
-            }
-            if (private_param(1049)) {
-                enter_alt_screen(true);
-            }
-        } else {
-            if (private_param(47) || private_param(1047)) {
-                leave_alt_screen(false);
-            }
-            if (private_param(1049)) {
-                leave_alt_screen(true);
-            }
-        }
-        return;
-    }
-
-    for (int value : csi_params_) {
-        if (value == 4) {
-            insert_mode_ = enabled;
-        }
-    }
-}
-
-void TerminalEmulator::enter_alt_screen(bool save)
-{
-    if (save) {
-        saved_main_cursor_ = cursor_;
-    }
-    alt_active_ = true;
-    clear_active_screen();
-    cursor_ = {};
-    scroll_top_ = 0;
-    scroll_bottom_ = rows_ - 1;
-    mark_all_dirty();
-}
-
-void TerminalEmulator::leave_alt_screen(bool restore)
-{
-    alt_active_ = false;
-    if (restore) {
-        cursor_ = saved_main_cursor_;
-    }
-    scroll_top_ = 0;
-    scroll_bottom_ = rows_ - 1;
-    mark_all_dirty();
-}
-
-void TerminalEmulator::clear_active_screen()
-{
-    std::fill(active_cells().begin(), active_cells().end(), kBlank);
-    mark_all_dirty();
-}
-
-void TerminalEmulator::append_device_attributes()
-{
-    pending_output_ += "\x1B[?62;1;2;6;8;9;15;c";
-}
-
-void TerminalEmulator::append_secondary_device_attributes()
-{
-    pending_output_ += "\x1B[>0;115;0c";
-}
-
-void TerminalEmulator::append_cursor_report(bool dec)
-{
-    pending_output_ += "\x1B[";
-    if (dec) {
-        pending_output_ += "?";
-    }
-    pending_output_ += std::to_string(cursor_.row + 1);
-    pending_output_ += ";";
-    pending_output_ += std::to_string(cursor_.col + 1);
-    pending_output_ += "R";
-}
-
-void TerminalEmulator::handle_escape(uint8_t ch)
-{
-    if (selecting_charset_) {
-        handle_charset_select(ch);
-        return;
-    }
-    if (ch == '[') {
-        begin_csi();
-        return;
-    }
-    if (ch == '(' || ch == ')' || ch == '*' || ch == '+' || ch == '-' || ch == '.' || ch == '/' || ch == '%') {
-        selecting_charset_ = true;
-        return;
-    }
-    if (ch == '#') {
-        state_ = ParserState::kIgnoreOne;
-        return;
-    }
-    if (ch == ']' || ch == 'P' || ch == '^' || ch == '_') {
-        state_ = ParserState::kOsc;
-        return;
-    }
-    if (ch == '7') {
-        save_cursor();
-    } else if (ch == '8') {
-        restore_cursor();
-    } else if (ch == 'D') {
-        line_feed();
-    } else if (ch == 'M') {
-        reverse_index();
-    } else if (ch == 'H') {
-        set_tab_stop();
-    } else if (ch == 'E') {
-        line_feed();
-        carriage_return();
-    } else if (ch == '=') {
-        // Application keypad mode. The Cardputer keyboard sends explicit escape
-        // sequences, so keypad mode does not change rendering state.
-    } else if (ch == '>') {
-        // Numeric keypad mode.
-    } else if (ch == 'c') {
-        reset();
-    } else if (ch == 'Z') {
-        append_device_attributes();
-    }
-    state_ = ParserState::kGround;
-}
-
-void TerminalEmulator::handle_charset_select(uint8_t ch)
-{
-    dec_graphics_ = ch == '0';
-    selecting_charset_ = false;
-    state_ = ParserState::kGround;
-}
-
-void TerminalEmulator::begin_csi()
-{
-    csi_params_.clear();
-    csi_current_ = -1;
-    csi_private_ = '\0';
-    state_ = ParserState::kCsi;
-}
-
-void TerminalEmulator::collect_csi(uint8_t ch)
-{
-    if (ch >= '0' && ch <= '9') {
-        if (csi_current_ < 0) {
-            csi_current_ = 0;
-        }
-        csi_current_ = csi_current_ * 10 + (ch - '0');
-        return;
-    }
-    if (ch == ';' || ch == ':') {
-        csi_params_.push_back(csi_current_);
-        csi_current_ = -1;
-        return;
-    }
-    if (ch >= 0x20 && ch <= 0x2F) {
-        return;
-    }
-    if ((ch == '?' || ch == '>' || ch == '=') && csi_params_.empty() && csi_current_ < 0) {
-        csi_private_ = static_cast<char>(ch);
-        return;
-    }
-    if (ch >= 0x40 && ch <= 0x7E) {
-        csi_params_.push_back(csi_current_);
-        dispatch_csi(ch);
-        state_ = ParserState::kGround;
-    }
-}
-
-void TerminalEmulator::dispatch_csi(uint8_t final)
-{
-    int count = param(0, 1);
-    switch (final) {
-        case 'A':
-            move_cursor(-count, 0);
-            break;
-        case 'B':
-            move_cursor(count, 0);
-            break;
-        case 'C':
-            move_cursor(0, count);
-            break;
-        case 'D':
-            move_cursor(0, -count);
-            break;
-        case 'E':
-            move_cursor(count, 0);
-            carriage_return();
-            break;
-        case 'F':
-            move_cursor(-count, 0);
-            carriage_return();
-            break;
-        case 'G':
-            set_cursor(cursor_.row, param(0, 1) - 1);
-            break;
-        case 'H':
-        case 'f': {
-            int row = param(0, 1) - 1;
-            if (origin_mode_) {
-                row += scroll_top_;
-                row = clamp_int(row, scroll_top_, scroll_bottom_);
-            }
-            set_cursor(row, param(1, 1) - 1);
-            break;
-        }
-        case 'J':
-            clear_screen(param(0, 0));
-            break;
-        case 'K':
-            clear_line(param(0, 0));
-            break;
-        case 'L':
-            scroll_down(cursor_.row, scroll_bottom_, count);
-            break;
-        case 'M':
-            scroll_up(cursor_.row, scroll_bottom_, count);
-            break;
-        case 'P':
-            for (int col = cursor_.col; col < cols_; ++col) {
-                int src = col + count;
-                active_cell(cursor_.row, col) = src < cols_ ? active_cell(cursor_.row, src) : kBlank;
-            }
-            mark_dirty(cursor_.row);
-            break;
-        case 'Z':
-            for (int i = 0; i < count; ++i) {
-                int previous = 0;
-                for (int col = cursor_.col - 1; col > 0; --col) {
-                    if (tab_stops_[col]) {
-                        previous = col;
-                        break;
-                    }
-                }
-                cursor_.col = previous;
-            }
-            break;
-        case '@':
-            for (int col = cols_ - 1; col >= cursor_.col; --col) {
-                int src = col - count;
-                active_cell(cursor_.row, col) = src >= cursor_.col ? active_cell(cursor_.row, src) : kBlank;
-            }
-            mark_dirty(cursor_.row);
-            break;
-        case 'X':
-            clear_cells(cursor_.row, cursor_.col, cursor_.row, cursor_.col + count - 1);
-            break;
-        case 'a':
-            move_cursor(0, count);
-            break;
-        case 'b':
-            for (int i = 0; i < count; ++i) {
-                put_glyph(last_printed_codepoint_, last_printed_width_);
-            }
-            break;
-        case 'c':
-            if (csi_private_ == '>') {
-                append_secondary_device_attributes();
-            } else {
-                append_device_attributes();
-            }
-            break;
-        case 'S':
-            scroll_up(scroll_top_, scroll_bottom_, count);
-            break;
-        case 'T':
-            scroll_down(scroll_top_, scroll_bottom_, count);
-            break;
-        case 'd':
-            set_cursor((origin_mode_ ? scroll_top_ : 0) + param(0, 1) - 1, cursor_.col);
-            break;
-        case 'e':
-            move_cursor(count, 0);
-            break;
-        case 'g':
-            if (param(0, 0) == 3) {
-                clear_all_tab_stops();
-            } else {
-                clear_tab_stop(cursor_.col);
-            }
-            break;
-        case 'm':
-            apply_sgr();
-            break;
-        case 'n':
-            if (csi_private_ == '?' && param(0, 0) == 6) {
-                append_cursor_report(true);
-            } else if (param(0, 0) == 5) {
-                pending_output_ += "\x1B[0n";
-            } else if (param(0, 0) == 6) {
-                append_cursor_report(false);
-            }
-            break;
-        case 'r': {
-            int top = param(0, 1) - 1;
-            int bottom = param(1, rows_) - 1;
-            set_scroll_region(top, bottom);
-            break;
-        }
-        case 's':
-            save_cursor();
-            break;
-        case 'u':
-            restore_cursor();
-            break;
-        case 'h':
-            apply_mode(true);
-            break;
-        case 'l':
-            apply_mode(false);
-            break;
+    switch (prop) {
+        case VTERM_PROP_CURSORVISIBLE:
+            terminal->cursor_visible_ = value->boolean != 0;
+            terminal->mark_dirty(terminal->cursor_.row);
+            return 1;
+        case VTERM_PROP_ALTSCREEN:
+            terminal->alt_active_ = value->boolean != 0;
+            terminal->mark_all_dirty();
+            return 1;
         default:
-            break;
+            return 1;
     }
 }
 
-int TerminalEmulator::param(size_t index, int fallback) const
+int TerminalEmulator::bell_callback(void* user)
 {
-    if (index >= csi_params_.size() || csi_params_[index] <= 0) {
-        return fallback;
-    }
-    return csi_params_[index];
+    return 1;
 }
 
-bool TerminalEmulator::private_param(int value) const
+int TerminalEmulator::resize_callback(int rows, int cols, void* user)
 {
-    if (csi_private_ != '?') {
-        return false;
+    auto* terminal = static_cast<TerminalEmulator*>(user);
+    if (terminal == nullptr) {
+        return 0;
     }
-    return std::find(csi_params_.begin(), csi_params_.end(), value) != csi_params_.end();
+    terminal->rows_ = clamp_int(rows, 4, 24);
+    terminal->cols_ = clamp_int(cols, 8, 80);
+    terminal->dirty_.assign(terminal->rows_, true);
+    for (auto& line : terminal->scrollback_) {
+        line.resize(terminal->cols_, kBlank);
+    }
+    return 1;
+}
+
+int TerminalEmulator::sb_pushline_callback(int cols, const VTermScreenCell* cells, void* user)
+{
+    static_cast<TerminalEmulator*>(user)->append_scrollback_line(cols, cells);
+    return 1;
+}
+
+int TerminalEmulator::sb_popline_callback(int cols, VTermScreenCell* cells, void* user)
+{
+    return 0;
+}
+
+int TerminalEmulator::sb_clear_callback(void* user)
+{
+    auto* terminal = static_cast<TerminalEmulator*>(user);
+    if (terminal != nullptr) {
+        terminal->scrollback_.clear();
+    }
+    return 1;
+}
+
+int TerminalEmulator::sb_pushline4_callback(int cols, const VTermScreenCell* cells, bool continuation, void* user)
+{
+    static_cast<TerminalEmulator*>(user)->append_scrollback_line(cols, cells);
+    return 1;
 }
 
 }  // namespace adv

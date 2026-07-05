@@ -78,29 +78,29 @@ bool parse_server_string(const std::string& raw, SshProfile& profile)
     return true;
 }
 
-std::string key_to_shell_bytes(const KeyEvent& event, bool application_cursor)
+std::string key_to_shell_bytes(const KeyEvent& event, TerminalEmulator& terminal)
 {
-    const char* prefix = application_cursor ? "\x1BO" : "\x1B[";
     switch (event.kind) {
         case KeyKind::kCharacter:
-            return (event.character >= 1 && event.character <= 126) ? std::string(1, event.character) : std::string();
+            return (event.character >= 1 && event.character <= 126) ? terminal.encode_character(event.character)
+                                                                     : std::string();
         case KeyKind::kEnter:
-            return "\r";
+            return terminal.encode_key(TerminalInputKey::kEnter);
         case KeyKind::kEscape:
-            return "\x1B";
+            return terminal.encode_key(TerminalInputKey::kEscape);
         case KeyKind::kBackspace:
         case KeyKind::kDelete:
-            return "\x7F";
+            return terminal.encode_key(TerminalInputKey::kBackspace);
         case KeyKind::kTab:
-            return "\t";
+            return terminal.encode_key(TerminalInputKey::kTab);
         case KeyKind::kUp:
-            return std::string(prefix) + "A";
+            return terminal.encode_key(TerminalInputKey::kUp);
         case KeyKind::kDown:
-            return std::string(prefix) + "B";
+            return terminal.encode_key(TerminalInputKey::kDown);
         case KeyKind::kRight:
-            return std::string(prefix) + "C";
+            return terminal.encode_key(TerminalInputKey::kRight);
         case KeyKind::kLeft:
-            return std::string(prefix) + "D";
+            return terminal.encode_key(TerminalInputKey::kLeft);
         default:
             return {};
     }
@@ -533,7 +533,7 @@ void UiApp::terminal_screen()
         } else {
             last_escape_tick = 0;
         }
-        std::string bytes = key_to_shell_bytes(*event, terminal.application_cursor_mode());
+        std::string bytes = key_to_shell_bytes(*event, terminal);
         if (!bytes.empty() && ssh_.write_shell(bytes) != ESP_OK) {
             terminal.process("\r\nERR: " + ssh_.last_error() + "\r\n");
         } else if (bytes.size() == 1 && bytes[0] == '\x03') {
