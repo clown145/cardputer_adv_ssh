@@ -15,6 +15,13 @@ Native ESP-IDF firmware for the M5Stack Cardputer-Adv (`cardputer_adv`). It turn
 - Status bar icons for Wi-Fi, SSH state, and battery.
 - GitHub Actions workflow for CI builds and tag-based release packaging.
 
+## Language Support
+
+- Documentation: English by default, with a Simplified Chinese translation.
+- Device UI and WebUI: English.
+- Terminal display: UTF-8 input from the SSH session, with ASCII/English rendering and bundled M5GFX `efont_cn` CJK glyph presets for Chinese text. Unsupported glyphs render as `?`.
+- Keyboard input: ASCII letters, numbers, symbols, and control keys through the Fn layer. There is no on-device Chinese input method.
+
 ## Hardware And Firmware Target
 
 - Device: M5Stack Cardputer-Adv
