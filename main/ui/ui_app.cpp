@@ -395,6 +395,9 @@ void UiApp::terminal_screen()
         terminal.clear_dirty();
         last_draw_tick = xTaskGetTickCount();
     };
+    auto cursor_changed = [&]() {
+        return last_cursor_row != terminal.cursor_row() || last_cursor_col != terminal.cursor_col();
+    };
     auto draw_review = [&]() {
         refresh_status_flags();
         display_.draw_terminal_frame(layout, review_title());
@@ -462,7 +465,7 @@ void UiApp::terminal_screen()
         }
 
         TickType_t now = xTaskGetTickCount();
-        if (!terminal.dirty_rows().empty() &&
+        if ((!terminal.dirty_rows().empty() || cursor_changed()) &&
             (!got_output || last_draw_tick == 0 || (now - last_draw_tick) >= pdMS_TO_TICKS(50))) {
             draw_dirty();
         }

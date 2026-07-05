@@ -713,7 +713,7 @@ void TerminalEmulator::clear_cells(int row_start, int col_start, int row_end, in
         int first = row == row_start ? col_start : 0;
         int last = row == row_end ? col_end : cols_ - 1;
         for (int col = first; col <= last; ++col) {
-            active_cell(row, col) = kBlank;
+            clear_wide_fragment(row, col);
         }
         mark_dirty(row);
     }
