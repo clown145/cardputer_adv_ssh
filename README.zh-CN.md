@@ -97,6 +97,20 @@ WebUI 可以用于：
 
 终端标签栏、配色主题、中文字体预设会保存。临时缩放不会保存。
 
+## Fn 层按键
+
+`Fn` 可以按住再按另一个键，也可以轻按一次，让它作用到下一个按键。
+
+- `Fn` + `;`：上
+- `Fn` + `,`：左
+- `Fn` + `.`：下
+- `Fn` + `/`：右
+- `Fn` + 字母：发送对应的 Ctrl 字符，例如 `Fn` + `C` 是 Ctrl-C，`Fn` + `D` 是 Ctrl-D，`Fn` + `L` 是 Ctrl-L。
+- `Fn` + `[`：Esc
+- `Fn` + `\` / `]`：`Ctrl-\` / `Ctrl-]`
+- `Fn` + `Shift` + `6`：Ctrl-^
+- `Fn` + `Shift` + `-`：Ctrl-_
+
 ## 发版工作流
 
 `.github/workflows/firmware-release.yml` 会在 push 和 PR 时编译固件。推送版本 tag 时会发布 GitHub Release：

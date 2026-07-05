@@ -97,6 +97,20 @@ The firmware tries the stored private key first and falls back to the profile pa
 
 Terminal chrome, color theme, and CJK font preset are saved settings. Temporary zoom is intentionally not saved.
 
+## Fn Layer
+
+`Fn` can be held while pressing another key, or tapped once to apply to the next key.
+
+- `Fn` + `;`: Up
+- `Fn` + `,`: Left
+- `Fn` + `.`: Down
+- `Fn` + `/`: Right
+- `Fn` + a letter: sends the matching control character, for example `Fn` + `C` for Ctrl-C, `Fn` + `D` for Ctrl-D, and `Fn` + `L` for Ctrl-L.
+- `Fn` + `[`: Esc
+- `Fn` + `\` / `]`: `Ctrl-\` / `Ctrl-]`
+- `Fn` + `Shift` + `6`: Ctrl-^
+- `Fn` + `Shift` + `-`: Ctrl-_
+
 ## Release Workflow
 
 The GitHub Actions workflow in `.github/workflows/firmware-release.yml` builds the firmware on pushes and pull requests. Pushing a version tag publishes a GitHub Release:
